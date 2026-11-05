@@ -1,57 +1,195 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Simple Container
 
-package echo
+package mws
 
 import (
+	"encoding/json"
 	"testing"
 
 	. "github.com/onsi/gomega"
-
 	"github.com/simple-container-com/api/pkg/api"
 )
 
-// init() must register every type token it owns both as a config reader
-// (so SC core can parse the YAML) and as a PluginRequirement OwnedType
-// (so fool-protection auto-inject reaches it). Mismatches are the one
-// silent gap the template exists to prevent — operators who upgrade and
-// use only the un-listed token get no auto-inject and a late deploy
-// error "unknown resource type".
+// init() must register every type token this plugin owns as a PluginRequirement
+// OwnedType, so SC core's fool-protection auto-injects the `plugins.mws:` block
+// when it meets the token in a server.yaml. A gap here is the one SILENT failure
+// in the whole plugin surface: an operator who uses only the un-listed token
+// gets no auto-inject, no parse error, and a deploy that dies much later with
+// "unknown resource type".
 func TestInitRegistersEveryOwnedType(t *testing.T) {
 	RegisterTestingT(t)
 
 	req, ok := api.LookupPluginRequirement(ProviderType)
 	Expect(ok).To(BeTrue(), "ProviderType %q must appear in RegisterPluginRequirement's OwnedTypes", ProviderType)
-	Expect(req.PluginName).To(Equal("echo"))
+	Expect(req.PluginName).To(Equal("mws"),
+		"PluginName must match the `pluginName` const in plugin/cmd/sc-plugin-mws/main.go — core keys the release, the auto-injected block and the driver table by it")
 	Expect(req.DefaultSource.Type).To(Equal("github-release"))
-	Expect(req.DefaultSource.Repository).To(Equal("simple-container-com/sc-plugin-echo"))
+	Expect(req.DefaultSource.Repository).To(Equal("simple-container-com/sc-plugin-mws"))
 
-	// Every token the template exports must be lookup-able — a token
-	// added to the const block above but missed from OwnedTypes would
-	// fail here with a message naming the specific gap.
 	for _, token := range []string{
-		AuthTypeEchoKey,
-		RegistrarTypeEchoDns,
-		TemplateTypeEchoFunction,
-		ResourceTypeEchoBucket,
-		DriverEchoVm,
-		StateStorageTypeEchoBucket,
-		SecretsProviderTypeEchoKms,
+		ProviderType,
+		AuthTypeMwsServiceAccount,
+		// DriverMwsVm is reached through api.VmConfigAware, not res.Type — a
+		// VM-ONLY stack (every first MWS stack) depends on this entry.
+		DriverMwsVm,
 	} {
 		_, ok := api.LookupPluginRequirement(token)
-		Expect(ok).To(BeTrue(), "token %q is not in OwnedTypes — fool-protection will silently skip server.yamls that only use this type", token)
+		Expect(ok).To(BeTrue(),
+			"token %q is not in OwnedTypes — fool-protection will silently skip server.yamls that only use this type", token)
 	}
 }
 
-// Auth validation surfaces a clear, named error. Real plugins add tests
-// for every per-cloud credential field they refuse.
-func TestEchoAccountConfigValidate(t *testing.T) {
+// The auth type must be parseable by the reader init() registered against it.
+// This is the config tier's whole job; a reader that does not round-trip means
+// `${auth:…}` resolves to a zero-value struct and the deploy authenticates as
+// nobody.
+func TestReadServiceAccountConfigRoundTrips(t *testing.T) {
 	RegisterTestingT(t)
 
-	err := (&EchoAccountConfig{}).Validate()
-	Expect(err).To(HaveOccurred())
-	Expect(err.Error()).To(ContainSubstring("`token` is required"))
-
-	err = (&EchoAccountConfig{Token: "xyz"}).Validate()
+	cfg, err := ReadServiceAccountConfig(&api.Config{Config: &AccountConfig{
+		Token:   "t-abc",
+		Project: "p-1",
+		Zone:    "ru-central1-b",
+	}})
 	Expect(err).ToNot(HaveOccurred())
+
+	acc, ok := cfg.Config.(*AccountConfig)
+	Expect(ok).To(BeTrue(), "reader must yield *AccountConfig")
+	Expect(acc.ProviderType()).To(Equal(ProviderType))
+	Expect(acc.ProjectIdValue()).To(Equal("p-1"))
+	Expect(acc.EffectiveZone()).To(Equal("ru-central1-b"))
+	Expect(acc.EffectiveEndpoint()).To(Equal(DefaultEndpoint), "an unset endpoint must resolve to the default, not to \"\"")
+	Expect(acc.UsesAuthorizedKey()).To(BeFalse())
+}
+
+func TestEffectiveZoneDefaults(t *testing.T) {
+	RegisterTestingT(t)
+
+	Expect((&AccountConfig{}).EffectiveZone()).To(Equal(DefaultZone))
+	Expect((&AccountConfig{Zone: "ru-central1-c"}).EffectiveZone()).To(Equal("ru-central1-c"))
+}
+
+// validKey builds a minimal authorized-key document in MWS's own shape. The
+// field names are camelCase and `keyId` is a structured path — NOT the Yandex
+// shape (`id` / `service_account_id` / `private_key`), which is the natural wrong
+// guess given how closely the rest of MWS's auth model follows Yandex's. See
+// go.mws.cloud/go-sdk/mws/iam/service_account.go's UnmarshalJSON.
+func validKey(project string) string {
+	b, err := json.Marshal(map[string]string{
+		"keyId":      "projects/" + project + "/serviceAccounts/sa-deployer/authorizedKeys/key-1",
+		"privateKey": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg",
+		"publicKey":  "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE",
+		"algorithm":  "ES256",
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// Each case here is a deploy that would otherwise fail at the FAR end, inside
+// the Pulumi provider, as `load service account authorized key file: …` against
+// a path SC generated for its own temp copy of the secret — so the operator is
+// told their temp file is bad rather than their credential, and the message
+// names a file that is already unlinked by the time they look.
+func TestAccountConfigValidate(t *testing.T) {
+	RegisterTestingT(t)
+
+	for _, tc := range []struct {
+		name   string
+		cfg    AccountConfig
+		expect string // substring; "" means the config must validate
+	}{
+		{
+			name:   "neither credential",
+			cfg:    AccountConfig{Project: "p-1"},
+			expect: "one of `serviceAccountAuthorizedKey` or `token` is required",
+		},
+		{
+			// Upstream's switch takes the key first and never mentions the token it
+			// ignored (internal/provider/public/sdk.go:35), so an operator who set
+			// both would not learn which one authenticated them.
+			name:   "both credentials",
+			cfg:    AccountConfig{Project: "p-1", Token: "t", ServiceAccountAuthorizedKey: validKey("p-1")},
+			expect: "mutually exclusive",
+		},
+		{
+			name:   "no project",
+			cfg:    AccountConfig{Token: "t"},
+			expect: "`project` is required",
+		},
+		{
+			// The commonest real failure: a `${secret:…}` that resolved to a
+			// placeholder because the registry entry was missing. It looks exactly
+			// like any other non-JSON one-liner.
+			name:   "key is not JSON",
+			cfg:    AccountConfig{Project: "p-1", ServiceAccountAuthorizedKey: "${secret:mws-sa-key}"},
+			expect: "must be the authorized-key JSON document",
+		},
+		{
+			name:   "key is JSON but not an authorized key",
+			cfg:    AccountConfig{Project: "p-1", ServiceAccountAuthorizedKey: `{"accessKeyId":"x","secretAccessKey":"y"}`},
+			expect: "has no `privateKey` field",
+		},
+		{
+			name:   "wrong algorithm",
+			cfg:    AccountConfig{Project: "p-1", ServiceAccountAuthorizedKey: `{"keyId":"projects/p-1/serviceAccounts/sa/authorizedKeys/k","privateKey":"x","algorithm":"RS256"}`},
+			expect: "MWS's SDK accepts only",
+		},
+		{
+			// The SDK parses the project and service-account name OUT of keyId, so a
+			// malformed id authenticates as nobody.
+			name:   "malformed keyId",
+			cfg:    AccountConfig{Project: "p-1", ServiceAccountAuthorizedKey: `{"keyId":"key-1","privateKey":"x","algorithm":"ES256"}`},
+			expect: "which is not of the form",
+		},
+		{
+			// Authenticates fine, then 403s against the wrong project — or, worse,
+			// succeeds against it.
+			name:   "project disagrees with the key",
+			cfg:    AccountConfig{Project: "p-2", ServiceAccountAuthorizedKey: validKey("p-1")},
+			expect: `belongs to project "p-1"`,
+		},
+		{
+			name: "valid key",
+			cfg:  AccountConfig{Project: "p-1", ServiceAccountAuthorizedKey: validKey("p-1")},
+		},
+		{
+			name: "valid token",
+			cfg:  AccountConfig{Project: "p-1", Token: "t-abc"},
+		},
+	} {
+		err := tc.cfg.Validate()
+		if tc.expect == "" {
+			Expect(err).ToNot(HaveOccurred(), "case %q must validate", tc.name)
+			continue
+		}
+		Expect(err).To(HaveOccurred(), "case %q must be refused", tc.name)
+		Expect(err.Error()).To(ContainSubstring(tc.expect), "case %q", tc.name)
+	}
+}
+
+func TestProjectFromAuthorizedKey(t *testing.T) {
+	RegisterTestingT(t)
+
+	Expect((&AccountConfig{ServiceAccountAuthorizedKey: validKey("p-9")}).ProjectFromAuthorizedKey()).To(Equal("p-9"))
+	// No key, or a key that is not a key: "" rather than a panic — this is a
+	// logging helper, and Validate has already refused anything malformed.
+	Expect((&AccountConfig{}).ProjectFromAuthorizedKey()).To(BeEmpty())
+	Expect((&AccountConfig{ServiceAccountAuthorizedKey: "not json"}).ProjectFromAuthorizedKey()).To(BeEmpty())
+}
+
+// An operator may hand the whole credential over as one blob via `${secret:…}`
+// instead of filling fields; when they do, that blob must cross to the plugin
+// verbatim rather than being re-serialised from a struct that never saw it.
+func TestCredentialsValuePrefersTheBlob(t *testing.T) {
+	RegisterTestingT(t)
+
+	blob := &AccountConfig{Project: "p-1", Token: "t"}
+	blob.Credentials.Credentials = `{"raw":"blob"}`
+	Expect(blob.CredentialsValue()).To(Equal(`{"raw":"blob"}`))
+
+	plain := &AccountConfig{Project: "p-1", Token: "t-abc"}
+	Expect(plain.CredentialsValue()).To(ContainSubstring("t-abc"))
 }
