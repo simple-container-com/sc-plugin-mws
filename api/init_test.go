@@ -227,14 +227,24 @@ func TestAuthorizedKeyMustArriveAsAString(t *testing.T) {
 
 	// A nested YAML mapping arrives as a JSON object. This must be refused, and
 	// the error must name the field so the operator can find it.
-	mappingForm, err := json.Marshal(map[string]any{
-		"project":                     "p-1",
-		"serviceAccountAuthorizedKey": map[string]any{"id": "k1", "privateKey": "..."},
-	})
-	Expect(err).NotTo(HaveOccurred())
+	//
+	// These bytes are MEASURED, not hand-built: they are byte-for-byte what
+	// core's `PluginFieldConfig.CredentialsValue()` emitted for a secrets.yaml
+	// whose `serviceAccountAuthorizedKey` was written as a nested mapping,
+	// captured 2026-11-06 against api aa504f87 with this plugin loaded over the
+	// real gRPC wire. Do not regenerate this with `json.Marshal(map[string]any)`
+	// — that would assert only that encoding/json rejects an object where a
+	// string is wanted (never in doubt) while assuming our model of core's
+	// `coerceToStringIfScalarNumber` is right, which is the actual thing under
+	// test. The coercer walks nested maps and passes them through UNCHANGED, so
+	// nothing upstream of this Unmarshal refuses the mapping form: core's parse
+	// of secrets.yaml succeeds, the value crosses the wire intact, and this
+	// decode is the first and only guard. That makes the failure DEPLOY-time and
+	// in-process-here, not parse-time in core — see the playbook's trap 20.
+	const measuredMappingForm = `{"project":"smoke-project","serviceAccountAuthorizedKey":{"id":"not-a-real-key-id","key_algorithm":"RSA_2048","private_key":"not-a-real-key","service_account_id":"not-real"}}`
 
 	var bad AccountConfig
-	err = json.Unmarshal(mappingForm, &bad)
+	err = json.Unmarshal([]byte(measuredMappingForm), &bad)
 	Expect(err).To(HaveOccurred())
 	Expect(err.Error()).To(ContainSubstring("serviceAccountAuthorizedKey"))
 }
