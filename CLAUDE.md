@@ -187,7 +187,7 @@ that loads the plugin, not about anything `go.mod` can name.
 
 ## Traps
 
-[TRAPS.md](TRAPS.md) is the fifteen-trap index, with a note on which mechanisms
+[TRAPS.md](TRAPS.md) is the nineteen-trap index, with a note on which mechanisms
 are not in this repo yet and must be lifted verbatim from
 [`sc-plugin-echo`](https://github.com/simple-container-com/sc-plugin-echo) rather
 than re-derived. The canonical catalogue is
