@@ -57,6 +57,14 @@ bucket.
     Core's row must stay a placeholder forever — flipping its `Implemented` makes
     it core-owned again and locks this plugin out of `mws-vm`. So the driver slice
     takes **no api commit**, only a pin bump. See `internal/vm_driver.go`.
+  - **Before writing `VmHosts` or filling in capabilities, read
+    [`CLOUD-FACTS.md`](CLOUD-FACTS.md).** It is the live-measured shape of MWS
+    (2026-11-06, real credential): zones, vm types, the single disk type, where
+    boot images live, the cloud-init key, and the resource graph for one
+    reachable VM. Nearly every fact in it was guessed wrong first by analogy to
+    Yandex — including two with teeth: there is **no SSH-key field on the VM**
+    (keys go in the cloud-config or nowhere), and **ingress is default-deny**, so
+    a VM with no firewall rule provisions green and is unreachable.
   - Any handler you add that touches Pulumi: `runtime.NewContext(stdctx, header,
     runtime.WithLocalEngineFallback(p.progress))` + `defer runtime.Settle(rctx,
     &resp, &err)`, named returns `(resp *T, err error)`. Never `pctx.Close()`,

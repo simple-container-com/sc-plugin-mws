@@ -90,6 +90,13 @@ const DefaultEndpoint = "https://api.mwsapis.ru"
 // DefaultZone is upstream's default for `zone` (`MWS_ZONE`). MWS's zone names
 // follow Yandex's `ru-central1-*` convention, which is a coincidence of regional
 // naming and not an API relationship.
+//
+// Measured against the live API 2026-11-06 (it was an assumption before that):
+// this is a real zone, `status.ready.state: OK`. MWS has four — `ru-central1-a`,
+// `ru-central1-b`, `ru-central1-c` and `ru-siberia1-a` — across two regions. The
+// full measured list, and the three different spellings a zone/type/image id
+// takes depending on whether you are talking to the API, Terraform or the Go
+// SDK, are in ../CLOUD-FACTS.md.
 const DefaultZone = "ru-central1-a"
 
 func init() {

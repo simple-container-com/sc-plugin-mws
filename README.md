@@ -38,6 +38,26 @@ records each one and what follows from it. The short version:
   gocloud URL `sc-plugin-yandex` relies on actually requires. Naming is not
   compatibility.
 
+## What the cloud actually looks like
+
+[**CLOUD-FACTS.md**](CLOUD-FACTS.md) is the measured shape of MWS: zones and
+regions, the 40 vm types, the one disk type, where boot images live, the
+cloud-init mechanism, and the resource graph for one reachable VM. Read against
+the **live API on 2026-11-06** with a real service-account key, plus the vendor's
+generated schema and example code.
+
+It exists because nearly every one of those facts was guessed wrong first by
+analogy to Yandex. Three that cost the most:
+
+- **Boot images are in per-distro system projects** (`mws-ubuntu`, `mws-debian`,
+  `mws-centos`). `ListImages` in your own project returns zero, and `public` /
+  `marketplace` / `standard-images` all return 403.
+- **cloud-init works**, via `os.metadata.attributes["user-data"]` — confirmed by
+  the vendor SDK's own SSH example. But there is **no SSH-key field on the VM**,
+  so key injection has to go through the cloud-config.
+- **Ingress is default-deny.** A VM with no firewall rule provisions green and is
+  unreachable.
+
 ## The VM driver, and why it is not advertised yet
 
 `mws-vm` is the next slice. It is **deliberately absent from `Schema()`**, and

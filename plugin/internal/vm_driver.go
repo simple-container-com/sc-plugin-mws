@@ -58,13 +58,23 @@ var ErrVmDriverNotImplemented = errors.Errorf(
 //     MWS. Validate refuses an unverified driver unless the resource opts in with
 //     `allowUnverifiedProvider: true`, and quotes the reason verbatim.
 //     "Implemented" and "known to work" are different claims.
-//   - `Capabilities.CloudInit` stays at the zero value until measured: MWS's
-//     provider documents no `user_data` input anywhere, and
-//     `os.metadata.attributes` is a plausible slot by analogy with Yandex and
-//     nothing more. Shared code in pkg/clouds/pulumi/vm branches on this field,
-//     so a guess here fails twenty minutes into a deploy.
-//   - `MultiAZInRegion` likewise — zero means "not measured", and Validate
-//     declines to check against it rather than inventing a limit.
+//   - `Capabilities.CloudInit` is **true**, and `CloudInitNeedsEgress` **false**
+//     — settled 2026-11-06, no longer a guess. The key is
+//     `os.metadata.attributes["user-data"]`: the vendor's own SDK example
+//     (`go-sdk@v0.29.0/examples/vm_ssh_test.go`) passes a `#cloud-config` there
+//     and then SSHes into the machine. The payload is self-contained, so nothing
+//     is fetched to apply it. Note the sharp edge that comes with it — MWS has
+//     **no SSH-key field on the VM at all**, so key injection goes only through
+//     the cloud-config, and an operator-supplied `user-data` must be merged with
+//     ours rather than overwritten.
+//   - `MultiAZInRegion` is **3** (`ru-central1`; `ru-siberia1` has one zone), and
+//     `Regionless` is false — both measured. Zero still means "not measured" to
+//     Validate, so don't leave them zero now that they are known.
+//   - Everything else measured about this cloud — the 40 vm types, the single
+//     disk type, where boot images actually live, and the default-DENY ingress
+//     that makes an otherwise-successful VM unreachable — is in
+//     ../../CLOUD-FACTS.md. Read it before writing VmHosts; most of it was
+//     guessed wrong first by analogy to Yandex.
 func VmDriverSpec() *scpluginv1.VmDriverSpec {
 	return vm.Drivers[vm.DriverMws].ToProto(vm.DriverMws)
 }
