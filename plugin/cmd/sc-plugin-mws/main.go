@@ -146,6 +146,32 @@ func (p *mwsPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		PluginVersion: version,
 		ProviderTypes: []string{mwsApi.ProviderType},
 
+		// The one line that makes this plugin usable at all. Until api #559
+		// (merged as 99411193, 2026-11-06) `SchemaResponse` had no
+		// `auth_types` field, so `type: mws-service-account` in a secrets.yaml
+		// died at PARSE with `unknown auth type` — before the provider, before
+		// any driver, before `AccountConfig.Validate()`, and before this binary
+		// was ever dialled. `api.DetectAuthProvider` (api `pkg/api/read.go:183`)
+		// is one lookup into `providerConfigMapping`, which core seeds either by
+		// link-time-importing a plugin's `/api` (four plugins; never this one)
+		// or from its hardcoded `plugin_bootstrap.go` table (five; never `mws`).
+		// This is the third seam — `stackread.registerSchemaTypes` loops these
+		// values and installs the OPAQUE decoder for each, which is why the
+		// go.mod pin and this line had to land in one commit: on an older core
+		// the field does not exist, and advertising nothing leaves the plugin
+		// unusable while bumping alone changes nothing.
+		//
+		// Verified end-to-end 2026-11-06 against a locally-built core: with this
+		// line, `auth["mws"]` decodes to `*api.PluginFieldConfig`; with it
+		// removed and nothing else changed, `unknown auth type
+		// "mws-service-account"`. Two consequences worth knowing — an operator
+		// must declare an explicit `plugins: mws:` block (auto-injection runs
+		// after type discovery, so it cannot bootstrap this), and because the
+		// decoder is opaque, core performs NO parse-time validation of the auth
+		// tree: every refusal is ours, at deploy time, in this process. See
+		// TRAPS.md 17 / 19 / 20.
+		AuthTypes: []string{mwsApi.AuthTypeMwsServiceAccount},
+
 		// Deliberately empty, one measured reason each (../../api/init.go):
 		//   RegistrarTypes        — MWS models no DNS zone/recordset resource.
 		//   ResourceTypes         — no bucket, no registry; nothing to own yet.
