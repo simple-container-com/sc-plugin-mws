@@ -2,16 +2,43 @@
 
 Simple Container's cloud plugin for **MWS (МТС Web Services)**.
 
-Status: **scaffolding.** The plugin parses MWS credentials and nothing else yet.
-Read the next two sections before assuming a gap is unfinished work — most of
-them are facts about the cloud.
+Status: **scaffolding, and not yet usable on any released SC core.** Read the
+next two sections before assuming a gap is unfinished work — most of them are
+facts about the cloud.
+
+> **Hard blocker, found 2026-11-06: a plugin's `auth:` type has no wire path.**
+> `scpluginv1.SchemaResponse` has no `auth_types` field — its complete field set
+> is `ProviderTypes`, `ResourceTypes`, `RegistrarTypes`, `StateStoreTypes`,
+> `SecretsProviderTypes`, `ComputeProcessorTypes`, `VmDrivers`,
+> `SafeToReplaceTypes`, `PulumiPlugins`, `PluginVersion` — so there is no way for
+> this plugin to tell SC core that `mws-service-account` exists. An operator
+> writing it gets `unknown auth type "mws-service-account"` at **parse** time
+> (`api.DetectAuthProvider`, `pkg/api/read.go:182`), before the provider, the
+> driver, or `AccountConfig.Validate()` is reached.
+>
+> The two registration paths are both compiled into core's binary: core's
+> `go.mod` importing the plugin's `/api` (it requires four —
+> `sc-plugin-{aws,cloudflare,mongodb,yandex}/api`, not this one), or core's
+> hardcoded table in `pkg/api/plugin_bootstrap.go` (aws, yandex, cloudflare,
+> cloudru, mongodb — not `mws`). Verified offline against core `41dc03e8`:
+> `mws-service-account` fails while `cloudru-evolution-key`, `yc-service-account`
+> and `aws-token` resolve.
+>
+> Tracked as **`sc-plugin-auth-type-has-no-wire-path`** in the forge roadmap
+> (repo: api). Recommended fix is an additive `auth_types` field on
+> `SchemaResponse` plus a `PluginOwnedKindAuth` branch in
+> `stackread.registerSchemaTypes` — which that function's own doc already
+> anticipates. Note it would give auth the **opaque** decoder, so
+> `AccountConfig.Validate()` must then be called by **this plugin** when it
+> decodes the raw tree on its own bus; parse-time *typed* validation stays a
+> link-time-import privilege.
 
 ## What this plugin owns
 
 | Surface | Token | State |
 |---|---|---|
 | Provider | `mws` | ✅ advertised |
-| Auth | `mws-service-account` | ✅ parsed + validated at config time |
+| Auth | `mws-service-account` | ⛔ written + unit-tested, but **unreachable** — see below |
 | VM driver | `mws-vm` | ⛔ not advertised — blocked, see below |
 | Registrar | — | ✖ MWS models no DNS zone/recordset resource |
 | Resources | — | ✖ no object storage, no container registry |
@@ -150,7 +177,12 @@ auth:
       serviceAccountAuthorizedKey: ${secret:mws-sa-key}
 ```
 
-`AccountConfig.Validate()` refuses, at **parse** time: neither credential; both
+`AccountConfig.Validate()` refuses — see the blocker at the top of this file for
+*when*: today it is unit-tested but never called on any deploy path, because core
+cannot resolve `mws-service-account` at all, and once the auth wire path exists
+the decoder core installs is the opaque one. So this plugin must call `Validate()`
+itself on the raw tree it receives, and `VmHosts` is the first handler that has to.
+The refusals, wherever they end up running: neither credential; both
 (upstream's switch silently prefers the key and never mentions the token it
 ignored); no `project`; a key that is not JSON (the commonest real failure — a
 `${secret:…}` that resolved to a placeholder looks exactly like any other

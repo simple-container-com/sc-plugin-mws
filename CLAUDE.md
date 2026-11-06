@@ -8,6 +8,36 @@ does and does not model, which is the difference between "not written yet" and
 registrar for a cloud with no DNS resource, or a state store for a cloud with no
 bucket.
 
+## Read this first: the plugin is not usable yet, and not for the reason you'd guess
+
+The VM driver's absence is sequencing. The blocker is **auth**: there is no wire
+path by which a plugin can tell SC core that its `auth:` type exists.
+`scpluginv1.SchemaResponse` has no `auth_types` field, and
+`stackread.registerSchemaTypes` has no auth branch (there isn't even a
+`PluginOwnedKindAuth` constant). So `type: mws-service-account` fails at parse
+with `unknown auth type` — before the provider, the driver, or
+`AccountConfig.Validate()` is reached. Core learns auth types only at link time:
+by importing a plugin's `/api` (core's `go.mod` requires four; not this one) or
+from its hardcoded `pkg/api/plugin_bootstrap.go` table (five plugins; not `mws`).
+
+Consequences for anyone working here:
+
+- **Don't write "parsed + validated at config time" about this plugin.** It was
+  written and unit-tested; it is not reached. Verified offline against core
+  `41dc03e8` — `mws-service-account` fails, `cloudru-evolution-key` /
+  `yc-service-account` / `aws-token` resolve.
+- **`AccountConfig.Validate()` is this plugin's job to call.** Even after the
+  wire path lands, dynamically-discovered types get the *opaque* decoder
+  (`map[string]any` on the bus), not the typed one. `VmHosts` is the first
+  handler that must decode the raw tree and call `Validate()` before touching
+  MWS. Parse-time typed validation is a link-time-import privilege this plugin
+  doesn't have.
+- **"The driver slice needs no api commit" is scoped.** True of the driver
+  *token* — `VmDrivers` does cross the wire, which is what api #558 made safe.
+  False of the plugin being *usable*.
+
+Tracked in forge as `sc-plugin-auth-type-has-no-wire-path` (repo: api).
+
 ## Hard rules, before anything else
 
 - **Nothing in this repo provisions.** No `pulumi up`, no `terraform apply`, no
@@ -23,9 +53,12 @@ bucket.
 
 ## Structure
 
-- **`/api` — the CONFIG TIER.** Its own Go module, because **SC core imports
-  it**: it must carry no cloud SDK, or `go.mws.cloud/go-sdk` rides into every SC
-  consumer.
+- **`/api` — the CONFIG TIER.** Its own Go module, because **SC core is meant to
+  import it** eventually: it must carry no cloud SDK, or `go.mws.cloud/go-sdk`
+  rides into every SC consumer. Note "imports it" is the *design*, not today's
+  fact — core's `go.mod` requires `sc-plugin-{aws,cloudflare,mongodb,yandex}/api`
+  and not this one, which is the root of the auth blocker above. The no-SDK rule
+  still binds: it is cheap now and unpayable later.
   - `init.go` — the token consts, `api.RegisterProviderConfig` (the readers) and
     `api.RegisterPluginRequirement` (fool-protection). Its package doc is the
     record of what MWS has.
