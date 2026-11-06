@@ -135,7 +135,9 @@ func (p *mwsPlugin) SetBroker(b *hplugin.GRPCBroker) { p.broker = b }
 // Keep in sync with ../../api/init.go's OwnedTypes. The two halves fail
 // differently: a token missing from OwnedTypes is a SILENT fool-protection gap,
 // a token missing here is an unroutable type at deploy time. api/init_test.go
-// covers the OwnedTypes half.
+// covers the OwnedTypes half; main_test.go covers THIS half and, in
+// TestEverySchemaTokenIsAnOwnedType, the cross-check between them — which only
+// this module can run, since the dependency goes plugin → api and never back.
 func (p *mwsPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scpluginv1.SchemaResponse, error) {
 	return &scpluginv1.SchemaResponse{
 		PluginVersion: version,
