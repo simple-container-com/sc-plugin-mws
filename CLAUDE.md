@@ -31,15 +31,19 @@ green run mean something rather than merely not-fail.
 
 Consequences for anyone working here:
 
-- **`AccountConfig.Validate()` is this plugin's job to call, and nothing calls it
-  yet.** Dynamically-discovered types get the *opaque* decoder (`map[string]any`
-  on the bus), not the typed one, so core performs **no** parse-time validation of
-  the auth tree. `VmHosts` is the first handler that must decode the raw tree and
-  call `Validate()` before touching MWS. Parse-time typed validation remains a
-  link-time-import privilege this plugin doesn't have.
-- **Don't write "parsed + validated at config time" about this plugin.** It was
-  written and unit-tested; it is still not reached. The reason is now the opaque
-  decoder (TRAPS 19), not the missing wire path (TRAPS 17, cleared).
+- **`AccountConfig.Validate()` is this plugin's job to call — and as of the
+  `mws-vm` slice it IS called**, at `plugin/internal/vm_hosts.go:160`, on the raw
+  tree `VmHosts` decodes, before anything touches MWS. Dynamically-discovered
+  types get the *opaque* decoder (`map[string]any` on the bus), not the typed one,
+  so core performs **no** parse-time validation of the auth tree; parse-time typed
+  validation remains a link-time-import privilege this plugin doesn't have. Any
+  future handler has the same obligation — the call is per-handler, not global.
+- **Don't write "parsed + validated at config time" about this plugin.** The
+  validation runs at DEPLOY time, in this subprocess. Until the `mws-vm` slice it
+  ran nowhere at all despite being fully unit-tested, which is trap 19's whole
+  point: a direct unit test on a validator passes just as happily when nothing
+  calls it. If you add a handler, add a negative test that refuses through the
+  *handler*, not through `Validate()`.
 - **Every refusal is ours, at deploy time, after the state-store lock.** Because
   the decoder is opaque there is no string-typed field for core to reject a nested
   mapping against: a `serviceAccountAuthorizedKey` written as a YAML object parses
@@ -72,7 +76,16 @@ Tracked in forge as `sc-plugin-auth-type-has-no-wire-path` (repo: api). The api
 patch was owned by the `sc-plugins` session; this repo was the end-to-end
 verification, and it is the only check that the dynamic path works for a plugin
 core has never imported — the one case core's hand-maintained bootstrap table
-cannot cover. The remaining work here is sequencing: the VM driver.
+cannot cover.
+
+The `mws-vm` driver is written, advertised and unit-tested. **The remaining work
+is a live deploy**, and it is blocked on something this repo cannot decide for
+itself: `pulumi-mws` has no GitHub release, so the engine has nothing to download
+the provider binary from (and it cannot be built on the box this was written on —
+it needs Go 1.27). Cutting a release is a distribution decision; propose it to the
+operator with the alternative and wait. Until a machine boots,
+`VmDriverSpec().Unverified` stays non-empty and CLOUD-FACTS' open list is the
+honest inventory.
 
 ## Hard rules, before anything else
 
@@ -112,24 +125,41 @@ cannot cover. The remaining work here is sequencing: the VM driver.
 
 - **`/plugin` — the PROVISIONING TIER.** Its own Go module.
   `cmd/sc-plugin-mws/main.go` is the go-plugin gRPC server.
-  - `Schema()` advertises `mws` and nothing else. **Every emptiness there has a
-    comment giving its reason** — keep that property; an uncommented empty field
-    reads as an oversight and invites someone to "fix" it.
-  - `VmDrivers` is empty because **the driver isn't written** —
-    `internal.VmDriverSpec()` mirrors core's `Implemented: false` row, so
-    advertising it would refuse a deploy identically to advertising nothing. It
-    was *also* unsafe until 2026-11-06: on an SC core predating
-    [api #558](https://github.com/simple-container-com/api/pull/558),
-    `vm.RegisterPluginDriver` refuses the placeholder row and core turns that
-    into `return err` out of the whole plugin load — **every** deploy dies, not
-    just VM ones. **That gate is now clear:** api release `2026.11.24` points
-    exactly at the #558 merge `e8dcd103`. But an operator on an *older* core
-    still hits the hard failure, so the commit that starts advertising `mws-vm`
-    must also bump the pin — they land together, as below.
-    Core's row must stay a placeholder forever — flipping its `Implemented` makes
-    it core-owned again and locks this plugin out of `mws-vm`. So the driver slice
-    takes **no api commit**, only a pin bump. See `internal/vm_driver.go`.
-  - **Before writing `VmHosts` or filling in capabilities, read
+  - `Schema()` advertises the `mws` provider, `mws-service-account`, the
+    `mws-vm` driver and two `PulumiPlugins`. **Every remaining emptiness there
+    has a comment giving its reason** — keep that property; an uncommented empty
+    field reads as an oversight and invites someone to "fix" it.
+  - `VmDrivers` carries **one hand-built spec**, `internal.VmDriverSpec()`, with
+    `Implemented: true` and the capabilities measured in CLOUD-FACTS. Do not
+    "simplify" it back to `vm.Drivers[vm.DriverMws].ToProto(...)`: core's row is
+    an unflagged placeholder (`Implemented: false`), and advertising that would
+    refuse a deploy identically to advertising nothing.
+    **Core's row must stay a placeholder forever** — flipping its `Implemented`
+    without `MigratedToPlugin` makes it core-owned again under
+    `coreOwned() = Implemented && !MigratedToPlugin` and locks this plugin out of
+    its own driver name. `TestCoreRowMustStayAPlaceholder` watches that, on both
+    fields (`Implemented && MigratedToPlugin` is a legitimate core state, so a
+    test reading only `Implemented` would report a correct api change as a break).
+    So the driver slice took **no api commit**, only a pin bump.
+  - **The advertisement carries a hard core-version floor.** On an SC core
+    predating [api #558](https://github.com/simple-container-com/api/pull/558),
+    `vm.RegisterPluginDriver` refuses the placeholder row and core turns that into
+    `return err` out of the whole pre-engine plugin load — **every** deploy dies,
+    not just VM ones. The minimum is `e8dcd103`, shipped as api release
+    `2026.11.24`. Both `go.mod` files are pinned at or past it, and that pin and
+    the `Schema()` advertisement landed in the same commit *because* either half
+    alone is useless or dangerous. Never relax one without the other.
+  - **`PulumiPlugins` values are read off the generated SDK, not chosen.**
+    `{mws, 0.0.1-dev, github://api.github.com/simple-container-com/pulumi-mws}`
+    is exactly what `pulumi-mws`'s `PkgResourceDefaultOpts` bakes into every
+    resource; `pulumiVersion.go`'s empty `SdkVersion` is dead code. The field is
+    `PluginDownloadUrl` — `PulumiPluginRequirement` has no `Server` field. `tls`
+    is `5.5.0` per `go.mod`; **do not copy sc-plugin-cloudru's advertised
+    `5.3.0`**, which disagrees with cloudru's own module.
+    Caveat that outranks all of the above: **`pulumi-mws` has no release**, so the
+    engine cannot fetch `pulumi-resource-mws` yet. Cutting one is a distribution
+    decision — propose it, don't do it.
+  - **Before adding a handler or changing capabilities, read
     [`CLOUD-FACTS.md`](CLOUD-FACTS.md).** It is the live-measured shape of MWS
     (2026-11-06, real credential): zones, vm types, the single disk type, where
     boot images live, the cloud-init key, and the resource graph for one

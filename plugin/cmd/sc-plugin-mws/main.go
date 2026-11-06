@@ -3,57 +3,52 @@
 
 // sc-plugin-mws is SC's cloud plugin for MWS (МТС Web Services).
 //
-// # What this binary advertises today, and why it is so small
+// # What this binary advertises, and what the emptiness means
 //
-// Schema() advertises ONE thing: the `mws` provider type, so an operator can
-// write an `mws-service-account` auth block in server.yaml and have SC parse it.
-// Everything else is empty, and each emptiness is a measured fact about the cloud
-// rather than unfinished work — see the package doc on ../../api/init.go, which
-// records what MWS's Terraform provider does and does not model (no bucket, no
-// container registry, no standalone DNS zone). A plugin that advertised a
-// registrar or a state store it cannot back would be offered to operators by
-// fool-protection and then fail at provision time.
+// Schema() advertises the `mws` provider type and auth type (so an operator can
+// write an `mws-service-account` block in server.yaml), the `mws-vm` VM driver,
+// and the two Pulumi provider plugins the driver needs. Everything else is
+// empty, and each emptiness is a measured fact about the cloud rather than
+// unfinished work — see the package doc on ../../api/init.go, which records what
+// MWS's Terraform provider does and does not model (no bucket, no container
+// registry, no standalone DNS zone). A plugin that advertised a registrar or a
+// state store it cannot back would be offered to operators by fool-protection
+// and then fail at provision time.
 //
-// The VM driver (`mws-vm`) is the next slice and is NOT advertised yet. The
-// reason is a hard one, worth stating where the next author will be standing:
+// # The core-version floor, and why it is not negotiable
+//
 // SC core calls vm.RegisterPluginDriver for every driver in VmDrivers, and a
 // failure there is `return err` out of the whole pre-engine plugin load
 // (pkg/clouds/pulumi/plugin_preengine.go:265) — not a warning. On any SC core
 // older than the release carrying api PR #558, `mws-vm` has an unflagged
 // placeholder row in the in-tree Drivers table, so registration is refused with
-// "which SC core provides itself" and EVERY deploy that loads this plugin dies.
-// That is the exact shape of the 2026-10-30 sc-plugin-cloudru breakage.
+// "which SC core provides itself" and EVERY deploy that loads this plugin dies —
+// not just the ones using a VM. That is the exact shape of the 2026-10-30
+// sc-plugin-cloudru breakage, and it is why advertising `mws-vm` and raising the
+// api pin had to land as one commit.
 //
-// #558 MERGED 2026-11-06 (api e8dcd103) and api release 2026.11.24, published
+// #558 merged 2026-11-06 (api e8dcd103) and api release 2026.11.24, published
 // 26 minutes later, points at exactly that commit — verified with
 // `gh api repos/simple-container-com/api/compare/e8dcd103...2026.11.24` →
-// "status":"identical". So a downloadable `sc` binary now accepts the
-// registration and the release gate is CLEAR. Two notes for whoever re-checks:
-// the api release tags carry no `v` prefix (the `v2026.11.24` in `gh release
-// list` is the title; `gh release view v2026.11.24` 404s), and that release is
-// the CLI binary, not a Go module version — the only v-tags in the api repo are
-// `-preview` prereleases, so both go.mod files stay on a pseudo-version and the
-// pin moves by commit (`go get …/api@e8dcd103`).
+// "status":"identical". So **2026.11.24 is this plugin's minimum core version**.
+// Two notes for whoever re-checks: the api release tags carry no `v` prefix (the
+// `v2026.11.24` in `gh release list` is the title; `gh release view v2026.11.24`
+// 404s), and that release is the CLI binary, not a Go module version — the only
+// v-tags in the api repo are `-preview` prereleases, so both go.mod files stay on
+// a pseudo-version and the pin moves by commit (`go get …/api@e8dcd103`).
 //
-// What does NOT clear: an operator still on a core older than 2026.11.24 hits
-// the hard plugin-load failure above. So the commit that starts advertising
-// `mws-vm` is also the commit that raises the pin — they cannot be split.
+// # What is NOT yet true, despite a green build
 //
-// And the release by itself still does not make advertising
-// worthwhile, which is the easy thing to get wrong here. VmDriverSpec() reads
-// core's own Drivers row, and that row says Implemented: false — so core would
-// merge in a spec that makes VmConfig.Validate() refuse `provider: mws-vm`
-// exactly as it already does with nothing advertised (pkg/clouds/vm/vm.go:427).
-// Advertising buys something only when this plugin declares its OWN spec with
-// Implemented: true and measured capabilities, i.e. when the driver actually
-// exists. At that point VmDriverSpec() stops reading core's table and
-// hand-builds the row the way sc-plugin-echo does.
+// No machine has ever been provisioned on MWS by this driver. Every capability
+// in ../../internal/vm_driver.go is read-only API probing plus vendor example
+// code, and `mws-vm` is advertised with a non-empty `Unverified` reason, so a
+// deploy refuses without `allowUnverifiedProvider: true`. Clear that reason in
+// the change that records a boot, not in one that reports a compile.
 //
-// So the remaining order is: write the driver → hand-build the spec, advertise
-// it, and bump the api pin to >= e8dcd103, all in one change — and note that
-// that change needs no api COMMIT. #558 deliberately left core's `mws-vm` row a
-// placeholder; flipping its `Implemented` would lock this plugin back out. See
-// ../../internal/vm_driver.go for the ownership rule.
+// The other half is distribution: there is no pulumi-mws RELEASE, so the engine
+// cannot download `pulumi-resource-mws` even though PulumiPlugins names it
+// correctly below. A release pipeline is a distribution decision and needs the
+// operator's explicit yes.
 //
 // # Trap-prevention invariants inherited from the template
 //
@@ -66,8 +61,7 @@
 //     `defer runtime.Settle(rctx, &resp, &err)`. Never `pctx.Close()`, never
 //     `defer done()`. Settle drains outstanding RegisterResource goroutines;
 //     without it SC core plans a destroy of every state entry on the next apply
-//     (trap 7). No handler here touches Pulumi yet, which is why `runtime` is
-//     not imported — the VM driver will be the first, and must.
+//     (trap 7). VmHosts below is this plugin's one such handler.
 //   - A `Provision` that returns outputs returns `runtime.HarvestExports`'s map
 //     (traps 10/11), and a `ComputeProcess` goes through
 //     `runtime.RunComputeProcess` rather than a per-plugin collector (trap 16).
@@ -87,6 +81,7 @@ import (
 	hplugin "github.com/hashicorp/go-plugin"
 	scPlugin "github.com/simple-container-com/api/pkg/plugin"
 	scpluginv1 "github.com/simple-container-com/api/pkg/plugin/proto/v1"
+	"github.com/simple-container-com/api/pkg/plugin/runtime"
 
 	mwsApi "github.com/simple-container-com/sc-plugin-mws/api"
 	mwsInternal "github.com/simple-container-com/sc-plugin-mws/plugin/internal"
@@ -185,51 +180,94 @@ func (p *mwsPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		//                           the AWS KMS API, which is what the
 		//                           `awskms://` gocloud URL sc-plugin-yandex uses
 		//                           actually requires.
-		//   VmDrivers             — one gate left; see the package doc. The api
-		//                           RELEASE gate cleared 2026-11-06 (2026.11.24
-		//                           IS #558's merge e8dcd103), so a current core
-		//                           would accept the row. What remains is that
-		//                           the driver isn't written, and a spec read
-		//                           from core's Implemented:false row refuses a
-		//                           deploy identically to advertising nothing.
-		//                           Advertising must land together with the pin
-		//                           bump, since an operator on an older core
-		//                           still fails the whole plugin load. This is
-		//                           the one entry that is sequencing rather than
-		//                           absence.
 		PulumiPlugins: []*scpluginv1.PulumiPluginRequirement{
-			// Empty until the VM driver lands, at which point this becomes
-			// `{Package: "mws", Version: "0.1.0", Server:
-			// "github://api.github.com/simple-container-com/pulumi-mws"}` — the
-			// bridge is a third-party provider, so core needs the download server
-			// as well as the name or `pulumi up` cannot resolve it.
+			// pulumi-mws, the static bridge over MWS's Terraform provider. Both
+			// values are READ OFF THE GENERATED SDK rather than chosen, because the
+			// SDK is what every resource in internal/vm_hosts.go actually requests:
+			// `sdk/go/mws/internal/pulumiUtilities.go`'s PkgResourceDefaultOpts bakes
+			// `PluginDownloadURL("github://api.github.com/simple-container-com/pulumi-mws")`
+			// and `Version("0.0.1-dev")` into every single one. A number invented
+			// here that disagrees with that would have core prefetch one version
+			// while the resources ask for another.
+			//
+			// `0.0.1-dev` is the generator's placeholder — it appears because the SDK
+			// was generated without a version stamp (`pulumiVersion.go` has
+			// `SdkVersion = semver.Version{}`). It is honest about the state of
+			// things rather than tidy: there is no pulumi-mws RELEASE yet, so the
+			// engine cannot fetch `pulumi-resource-mws` at all. When the release
+			// pipeline is approved and lands, the SDK must be regenerated with a real
+			// version and this line moved with it — the two are one change.
+			//
+			// PluginDownloadUrl is the field's real name; there is no `Server` field
+			// on this message. It is non-empty precisely because this is a
+			// third-party provider: for an official one core leaves it blank and
+			// pulls from the Pulumi registry, which is geoblocked from RU networks
+			// anyway (see pulumi-mws's README).
+			{
+				Package:           "mws",
+				Version:           "0.0.1-dev",
+				PluginDownloadUrl: "github://api.github.com/simple-container-com/pulumi-mws",
+			},
+			// pulumi-tls — the VM driver mints two ED25519 key pairs (the deploy key
+			// and the machine's own host key) as tls.PrivateKey. Matches this module's
+			// go.mod; sc-plugin-cloudru advertises 5.3.0 while its go.mod is also on
+			// 5.5.0, so do not copy that number from there.
+			{Package: "tls", Version: "5.5.0"},
+		},
+		VmDrivers: []*scpluginv1.VmDriverSpec{
+			// Advertise `mws-vm` so core routes a `type: vm` / `provider: mws-vm`
+			// resource to this plugin's VmHosts RPC.
+			//
+			// Unlike sc-plugin-cloudru — which passes
+			// `vm.Drivers[...].ToProto(...)` straight through — this spec is
+			// HAND-BUILT in the plugin. Core's `mws-vm` row is a deliberate
+			// `Implemented: false` placeholder, and it has to stay one: api #558's
+			// ownership rule is `coreOwned() = Implemented && !MigratedToPlugin`,
+			// so flipping core's row would make core the owner and lock this
+			// plugin out of its own driver name. See ../../internal/vm_driver.go.
+			mwsInternal.VmDriverSpec(),
 		},
 	}, nil
 }
 
 // VmHosts converges a VM resource whose `provider:` names a driver this plugin
-// advertises. It is unreachable today — SC core only wires the VmHosts sidecar
-// when Schema() returns a non-empty VmDrivers list — and returns an explicit
-// refusal rather than a stub host, so that if the wiring ever reaches it the
-// operator is told the truth instead of being handed an address nothing listens
-// on. (sc-plugin-echo's template returns a TEST-NET host here; that is right for
-// a template and wrong for a real cloud.)
+// advertises, i.e. `mws-vm`. The work is in internal/vm_hosts.go; this is the
+// transport shell, and it is deliberately identical in shape to
+// sc-plugin-cloudru's.
 //
-// The implementation, when it lands: read req.ConfigJson into
-// pkg/clouds/vm.VmConfig; convert credentials via api.ConvertAuth into
-// mwsApi.AccountConfig and materialise the authorized key to a 0600 temp file
-// (see the doc on AccountConfig for why a path and not a value); register the
-// pulumi-mws resources (compute.VirtualMachine, the one_to_one_nat address, a
-// vpc.FirewallRule, a tls deploy key); parse outputs through
-// plugin.OutputRefTo / AddressOutput / PrivateKeyOf; compose the VmHostBuilder
-// chain and return BuildVmHosts. api/pkg/plugin/vmhosts.go is the builder
-// surface; pkg/clouds/pulumi/vm/plugin_authoring_test.go is the end-to-end
-// pattern; sc-plugin-cloudru's `cloudru-evolution-vm` is the first live example.
-// And this handler is where the runtime.NewContext + runtime.Settle pair becomes
-// mandatory.
-func (p *mwsPlugin) VmHosts(_ context.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmHostsResponse, error) {
-	p.progress.Error("vm-hosts", fmt.Sprintf("refusing vm %q: driver %q is not implemented in this plugin version", req.GetResourceName(), req.GetDriver()))
-	return nil, mwsInternal.ErrVmDriverNotImplemented
+// The three lines that are not boilerplate:
+//
+//   - `runtime.NewContext(ctx, req.GetHeader(), …)` builds the Pulumi context
+//     from the header SC core sent. `WithLocalEngineFallback(p.progress)` is what
+//     lets the handler run under a local engine when no core-side monitor is on
+//     the other end — which is how the contract tests drive it.
+//   - `defer runtime.Settle(rctx, &resp, &err)` is MANDATORY and must take the
+//     ADDRESSES of the named returns, which is the only reason this signature
+//     names them. Settle drains RegisterResource goroutines that are still in
+//     flight when the handler returns; without it the engine never learns about
+//     those resources and SC core plans a DESTROY of every one of them on the
+//     next apply (trap 7). `pctx.Close()` is not a substitute and must not be
+//     used.
+//   - the progress lines bracket a multi-minute RPC. Six cloud resources plus a
+//     cloud-init boot is long enough that silence reads as a hang, and LogStream
+//     is the operator's only window into it.
+func (p *mwsPlugin) VmHosts(ctx context.Context, req *scpluginv1.VmHostsRequest) (resp *scpluginv1.VmHostsResponse, err error) {
+	p.progress.Info("vm-hosts", fmt.Sprintf("provisioning mws-vm %q (driver=%s)", req.GetResourceName(), req.GetDriver()))
+
+	rctx, err := runtime.NewContext(ctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.Settle(rctx, &resp, &err)
+
+	resp, err = mwsInternal.VmHosts(rctx.Pulumi, req)
+	if err != nil {
+		p.progress.Error("vm-hosts", fmt.Sprintf("vm %q failed: %v", req.GetResourceName(), err))
+		return nil, err
+	}
+
+	p.progress.Info("vm-hosts", fmt.Sprintf("vm %q ready, %d host(s)", req.GetResourceName(), len(resp.GetHosts())))
+	return resp, nil
 }
 
 // PreDestroy is dialled by SC core before Pulumi's destroy phase for EVERY
@@ -265,6 +303,13 @@ func (p *mwsPlugin) LogStream(_ *scpluginv1.LogStreamRequest, stream scpluginv1.
 }
 
 func main() {
+	// AFTER Serve returns, never in the VmHosts handler. The MWS provider reads
+	// the materialised authorized-key FILE during the engine's apply, which
+	// happens after the RPC that wrote it has already returned — a `defer` in the
+	// handler deletes the credential before the provider opens it. See
+	// internal/credential.go's header.
+	defer mwsInternal.CleanupCredentials()
+
 	impl := &mwsPlugin{progress: scPlugin.NewPublisher(0)}
 	scPlugin.Serve(scPlugin.ServerConfig{
 		Impl: impl,

@@ -215,12 +215,42 @@ The single most error-prone surface here. Same underlying id, three spellings:
 | Terraform / Pulumi attribute | **prefixed short path** | `vm_type = "vmTypes/gen-2-8"`, `disk_type = "diskTypes/nbs-pl2"` |
 | Go SDK | **bare id** via typed ref ctor | `computeref.NewMustVmTypeRef("gen-2-8")`, `NewMustDiskTypeRef("nbs-pl2")` |
 
+Two things the table above does not make obvious, both measured while writing the
+driver and both of which cost a wrong first draft:
+
+- **A `Ref` serialises SHORT; an `ID` serialises FULL.** Whether you write
+  `vmTypes/gen-2-8` or `compute/vmTypes/gen-2-8` is decided by which *field* you
+  are filling, not by which value you happen to hold. `vm_type` is a ref → short.
+  A cross-resource `.metadata.id` is an id → full.
+- **`zone` is the BARE id** — `ru-central1-a`, not `zones/ru-central1-a`. It is
+  the one place in the schema that breaks the ref convention, which is exactly why
+  it is easy to prefix out of habit.
+- **There is no id→name lookup for a network.** `mws_vpc_subnet.network` takes the
+  network's *name*, and nothing upstream resolves a network id to one. That is why
+  the `mws-vm` driver refuses SC's `network:` block (which carries an `id`) rather
+  than half-supporting it — see the refusal in `plugin/internal/vm_hosts.go`.
+
 Cross-resource references in Terraform use **`.metadata.id`** (the full path) —
 except `mws_vpc_subnet.network`, which takes the network's `.network` *name*
 field. That asymmetry is in the vendor's own example and is not a typo.
 
 Sizes are strings with a unit: `"10GB"` and `"10 GB"` both parse (the vendor uses
-both); the unit set is `B KB MB GB TB PB EB ZB YB RB QB`, default `B`.
+both); the unit set is `B KB MB GB TB PB EB ZB YB RB QB`, default `B`. The parser
+lowercases its input and tolerates the space, so `"10gb"` is the same value.
+
+**The units are BINARY despite the decimal-SI spelling.** Measured in the
+vendor's own parser — `go-sdk@v0.29.0/pkg/apimodels/units/bytesize/unit.go` has
+`gb = 1 << 30` and `tb = 1 << 40`, i.e. `"10GB"` is 10 GiB = 10 737 418 240
+bytes, not 10 000 000 000. There is no `GiB` spelling at all; `KB` is 1024.
+
+This closes a question the earlier drafts of this file left open, and the
+direction matters: reading `GB` as decimal understates every size by ~7% at the
+GB scale and ~10% at TB, so a 16 TB-ceiling check written against decimal maths
+would refuse disks the cloud accepts. The plugin's own constants are therefore
+written as binary shifts (`defaultDiskBytes = 30 << 30`, `maxDiskBytes = 16 <<
+40`) and `parseByteSize` accepts the `Gi`/`GiB` spellings an SC operator is used
+to as synonyms for the `G`/`GB` MWS actually wants — see
+`plugin/internal/mapping.go`.
 
 ## What is still unmeasured
 
@@ -239,6 +269,28 @@ Not guesses to fill in — open questions, each needing a live apply:
   here and no quota has been exercised.
 - `api.mwsapis.ru` from a **GitHub Actions runner** — measured only from the
   operator's line (401/envoy/HTTP-2 in ~85 ms, `188.93.55.134`, no geoblock).
+- **`vpc_firewall_rule.spec.ports` syntax.** The driver emits one rule per port
+  (`web-fw-tcp-22`, `web-fw-tcp-10250`) because a RANGE spelling is unmeasured —
+  whether it is `"22-80"`, a list, or a `from`/`to` pair. One-rule-per-port is
+  correct either way; it is only wasteful if ranges turn out to work.
+- **Protocol CASE.** The driver writes `"tcp"` lowercase. The schema is a string
+  with no documented enum, so `"TCP"` may or may not be the accepted spelling, and
+  a case mismatch would be refused at apply rather than at parse.
+- **The cloud-side object-name length and charset limit.** `mwsObjectName` in
+  `plugin/internal/mapping.go` truncates defensively and keeps the role suffix
+  (`-net`, `-subnet`, `-addr`, `-ext-addr`) on the *right* so four names stay
+  distinct after truncation, but the actual ceiling is a guess — nothing in the
+  schema or the vendor docs states one. A long stack name plus a long env is where
+  this will first bite.
+- **Whether SC's RENDERED cloud-config is one the guest accepts.** Not the same
+  question as the section above, which is settled: the key exists and the guest
+  consumes it, proven by the vendor's own `vm_ssh_test.go`. What is open is the
+  *document* — `vm.RenderCloudInit` had **zero prior deploy-path callers anywhere
+  in the fleet** before this driver, so SC has never had any cloud, on any
+  provider, apply its output. A malformed `#cloud-config` fails silently from the
+  outside: the machine boots, the apply goes green, and the only evidence is on
+  the guest. On the first deploy, read `/var/log/cloud-init-output.log` before
+  trusting the green check.
 
 ## Reproducing the probe
 

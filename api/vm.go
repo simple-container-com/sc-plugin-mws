@@ -64,12 +64,28 @@ package mws
 //     (`…addresses[].address.spec.dns.name`, with `ptr` and `ttl`). That is NOT a
 //     public zone: there is still no zone/recordset resource, so the public name
 //     comes from another registrar. Do not mistake one for the other.
-//   - **Cloud-init is UNVERIFIED.** There is no `user_data` attribute anywhere in
-//     the provider's docs. There is `os.metadata.attributes` (Map of String),
-//     which is the slot Yandex's provider uses for `user-data`, so cloud-init is
-//     plausible by analogy and nothing more. `vm.Drivers[vm.DriverMws]` therefore
-//     leaves `CloudInit` at its zero value, which capabilities.go defines as "not
-//     measured yet" — the driver's author must measure it against a real project
-//     and fill the row in the change that records the smoke. A guessed `true` here
-//     would be branched on by shared code (readiness gate, docker install path,
-//     host-key seeding) and would fail twenty minutes into a deploy.
+//   - **Cloud-init rides `os.metadata.attributes["user-data"]` — CONFIRMED.**
+//     There is no `user_data` attribute of its own anywhere in the provider's
+//     schema; the slot is the generic string map, the same one Yandex's provider
+//     uses. An earlier version of this comment called that a Yandex analogy and
+//     left `CloudInit` at its zero value. It is not an analogy: the vendor's own
+//     `go-sdk@v0.29.0/examples/vm_ssh_test.go` writes a `#cloud-config` to exactly
+//     that key and then SSHes into the machine and runs a command, and
+//     `acctest/.../virtual_machine.tf` uses the same key. So `CloudInit: true` and
+//     `CloudInitNeedsEgress: false` are measured, and the plugin writes the
+//     rendered document there (`plugin/internal/vm_hosts.go`).
+//
+//     The consequence that is easy to miss: **there is no SSH-key field on the VM
+//     resource at all** — not on the machine, the disk or the image. Key injection
+//     happens only through the cloud-config, which is why `VmHosts` must
+//     synthesise `users:`/`ssh_authorized_keys:` itself and why there is no
+//     vendor-guaranteed default login user.
+//
+//     What remains open is the DOCUMENT, not the mechanism: `vm.RenderCloudInit`
+//     had zero prior deploy-path callers anywhere in the fleet, so SC has never
+//     had any cloud apply its output, and a malformed `#cloud-config` fails
+//     silently from the outside (machine boots, apply goes green). Also unmeasured:
+//     whether the slot has a size cap — nothing in the schema states one, and a
+//     rendered document carrying a docker-compose is tens of KB. Both are in the
+//     driver spec's `Unverified` list; first deploy, read
+//     `/var/log/cloud-init-output.log` on the guest before believing the check.

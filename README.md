@@ -2,9 +2,20 @@
 
 Simple Container's cloud plugin for **MWS (МТС Web Services)**.
 
-Status: **scaffolding; the auth blocker is cleared, the VM driver is still unwritten.** Read the
-next two sections before assuming a gap is unfinished work — most of them are
-facts about the cloud.
+Status: **the auth blocker is cleared and the `mws-vm` driver is written,
+advertised and unit-tested — but no MWS machine has ever been provisioned by
+it.** Read the next two sections before assuming a gap is unfinished work — most
+of them are facts about the cloud.
+
+> **What "written and advertised" does not mean.** The driver registers ten
+> resources against `pulumi-mws`, its URNs are pinned by a test that drives the
+> real handler under mocks, and both modules are green. None of that is a deploy.
+> `pulumi-mws` has **no GitHub release**, so the engine cannot download
+> `pulumi-resource-mws` at all yet — cutting one is a distribution decision for
+> the operator, not something this repo can do for itself. Until a machine boots
+> through SC, `VmDriverSpec().Unverified` stays non-empty and
+> [CLOUD-FACTS.md](CLOUD-FACTS.md)'s open list is the honest inventory of what is
+> still a reading of vendor code rather than a measurement.
 
 > **Cleared 2026-11-06: a plugin's `auth:` type had no wire path, and now does.**
 > `scpluginv1.SchemaResponse` carried no `auth_types` field, so there was no way
@@ -41,8 +52,8 @@ facts about the cloud.
 | Surface | Token | State |
 |---|---|---|
 | Provider | `mws` | ✅ advertised |
-| Auth | `mws-service-account` | ⛔ written + unit-tested, but **unreachable** — see below |
-| VM driver | `mws-vm` | ⛔ not advertised — blocked, see below |
+| Auth | `mws-service-account` | ✅ advertised via `auth_types` (api #559) — see below |
+| VM driver | `mws-vm` | ✅ advertised + unit-tested; ⚠ never deployed — see below |
 | Registrar | — | ✖ MWS models no DNS zone/recordset resource |
 | Resources | — | ✖ no object storage, no container registry |
 | State store | — | ✖ follows from "no object storage" |
@@ -88,10 +99,11 @@ analogy to Yandex. Three that cost the most:
 - **Ingress is default-deny.** A VM with no firewall rule provisions green and is
   unreachable.
 
-## The VM driver, and why it is not advertised yet
+## The VM driver, and the core-version floor it carries
 
-`mws-vm` is the next slice. It is **deliberately absent from `Schema()`**, and
-the reason is sharp enough to state here rather than only in a code comment:
+`mws-vm` **is** advertised, as of this slice. The reason that sentence needed a
+whole section — and why the pin in both `go.mod` files is not a detail — is sharp
+enough to state here rather than only in a code comment:
 
 SC core calls `vm.RegisterPluginDriver` for every driver a plugin advertises,
 and a failure there is `return err` out of the **whole pre-engine plugin load**
@@ -127,18 +139,29 @@ this yourself:
   `e8dcd103` (`go get github.com/simple-container-com/api@e8dcd103`), not to
   `2026.11.24`.
 
-One gate remains:
+**Both gates are now cleared.** `internal.VmDriverSpec()` no longer mirrors
+core's row — it is **hand-built** with `Implemented: true` and the capabilities
+measured in [CLOUD-FACTS.md](CLOUD-FACTS.md) (`CloudInit: true`,
+`CloudInitNeedsEgress: false`, `Regionless: false`, `MultiAzInRegion: 3`,
+`PrivateNetwork`/`FloatingIp`/`SecurityGroups` true,
+`ContainerRegistry`/`DnsInIac` false), plus a non-empty `Unverified` list. Had it
+kept mirroring core, advertising would have made `VmConfig.Validate` refuse
+`provider: mws-vm` with the same message an operator gets with no plugin
+installed at all.
 
-**The driver isn't written.** `internal.VmDriverSpec()` currently mirrors
-core's row, which says `Implemented: false`, so advertising it would make
-`VmConfig.Validate` refuse `provider: mws-vm` with the same message an
-operator gets with no plugin installed. Advertising buys nothing until the
-spec is hand-built with `Implemented: true` and measured capabilities.
+The pin bump and the `Schema()` change landed **together**, which was not
+optional: an operator on a core older than `2026.11.24` still hits the hard
+plugin-load failure above, so the commit that starts advertising `mws-vm` is also
+the commit that raises the floor. `TestCoreRowMustStayAPlaceholder` guards the
+other direction — it fails if core ever flips its row to `Implemented: true`
+without `MigratedToPlugin`, which would silently lock this plugin out again. It
+deliberately asserts on **both** fields, because `Implemented && MigratedToPlugin`
+is a legitimate core state and a test watching only `Implemented` would report a
+correct api change as a break.
 
-Note the pin bump and `Schema()` change must land **together**: an operator on
-a core older than `2026.11.24` still hits the hard plugin-load failure, so the
-commit that starts advertising `mws-vm` is also the commit that raises the
-floor.
+**What is NOT cleared is the deploy.** See the status note at the top: no machine
+has been provisioned, and `pulumi-mws` has no release for the engine to download
+the provider binary from.
 
 The useful thing #558 *did* buy: core's `mws-vm` row stays a placeholder
 **permanently** (flipping its `Implemented` would make it core-owned again and
@@ -180,12 +203,15 @@ auth:
       serviceAccountAuthorizedKey: ${secret:mws-sa-key}
 ```
 
-`AccountConfig.Validate()` refuses — see the blocker at the top of this file for
-*when*: today it is unit-tested but never called on any deploy path, because core
-cannot resolve `mws-service-account` at all, and once the auth wire path exists
-the decoder core installs is the opaque one. So this plugin must call `Validate()`
-itself on the raw tree it receives, and `VmHosts` is the first handler that has to.
-The refusals, wherever they end up running: neither credential; both
+`AccountConfig.Validate()` refuses the configs below, and as of this slice it is
+**actually called on a deploy path** — `VmHosts` invokes it on the raw tree it
+decodes. That it had to is trap 19: the decoder core installs for a
+dynamically-discovered auth type is the **opaque** one, which keeps
+`Config.Config` as a raw `map[string]any`, so parse-time typed validation never
+runs on our behalf. Before this slice the function was written and unit-tested
+and reachable from nothing, which is the failure mode trap 19 warns about — a
+direct unit test passes just as happily against dead code. The refusals:
+neither credential; both
 (upstream's switch silently prefers the key and never mentions the token it
 ignored); no `project`; a key that is not JSON (the commonest real failure — a
 `${secret:…}` that resolved to a placeholder looks exactly like any other
@@ -223,9 +249,21 @@ sc-plugin-mws/
 ├── plugin/                   ← provisioning tier. The go-plugin subprocess SC
 │   │                           launches.
 │   ├── cmd/sc-plugin-mws/
-│   │   └── main.go           ← Schema, VmHosts (refusal), PreDestroy, LogStream
+│   │   └── main.go           ← Schema (provider + auth + VmDrivers +
+│   │                           PulumiPlugins), VmHosts, PreDestroy, LogStream
 │   └── internal/
-│       └── vm_driver.go      ← VmDriverSpec() from core's table + the refusal
+│       ├── vm_driver.go      ← VmDriverSpec(), HAND-BUILT with the measured
+│       │                       capabilities (not core's row — see above)
+│       ├── vm_hosts.go       ← the driver: Validate, 10 resources, cloud-init,
+│       │                       firewall rules honouring PortRange.Internal
+│       ├── mapping.go        ← SC config → MWS refs: zones/regions, the sparse
+│       │                       flavour grid, BINARY byte sizes, image aliases
+│       ├── credential.go     ← the authorized-key → 0600 temp file bridge and
+│       │                       the deterministic-path rule; Provider()
+│       ├── urn_contract_test.go  ← trap 21: pins all 10 URNs by driving the
+│       │                       real handler under mocks
+│       ├── mapping_test.go   ← the lookup tables and every refusal message
+│       └── credential_test.go   ← path determinism, 0700/0600, symlink refusal
 │
 └── .github/workflows/
     └── release.yml           ← CalVer, three-platform build, OOM-safe pins
@@ -233,13 +271,37 @@ sc-plugin-mws/
 
 ## Pulumi provider
 
-The VM driver will build on
+The VM driver builds on
 [`simple-container-com/pulumi-mws`](https://github.com/simple-container-com/pulumi-mws),
 a static Terraform bridge (pf flavour) over the upstream provider: 41 resources,
 1496 inputs, 53 functions, tokens shaped `mws:<service>/<resource>:<Resource>`.
-Once `Schema()` advertises the driver it must also advertise the provider in
-`PulumiPlugins` **with its download server** — a third-party provider cannot be
-resolved by name alone.
+A third-party provider cannot be resolved by name alone, so `Schema()` advertises
+it in `PulumiPlugins` with its download URL:
+
+```go
+{Package: "mws", Version: "0.0.1-dev",
+ PluginDownloadUrl: "github://api.github.com/simple-container-com/pulumi-mws"},
+{Package: "tls", Version: "5.5.0"},
+```
+
+Both values are **read off the generated SDK, not chosen.**
+`sdk/go/mws/internal/pulumiUtilities.go`'s `PkgResourceDefaultOpts` bakes exactly
+that URL and `semver.MustParse("0.0.1-dev")` into **every** resource, so anything
+else here would disagree with what the resources themselves request.
+(`pulumiVersion.go`'s empty `SdkVersion`/`pluginDownloadURL` are dead code — do
+not read them as the answer.) `0.0.1-dev` is the generator's placeholder: it moves
+only together with a regenerated SDK once a real release tag exists. The field is
+spelled `PluginDownloadUrl`; `PulumiPluginRequirement` has **no `Server` field**
+(`plugin.pb.go:1093` — `Package`, `Version`, `PluginDownloadUrl`). And `tls` is
+`5.5.0` because that is what both this repo's and sc-plugin-cloudru's `go.mod`
+pin — cloudru *advertises* `5.3.0`, disagreeing with its own module, so that
+number must not be copied.
+
+**The gap this leaves.** `pulumi-mws` has **no GitHub release**, so the engine has
+nothing to download `pulumi-resource-mws` *from*; the advertisement is correct and
+still unusable. The provider binary also cannot be built on the box this was
+written on (it needs Go 1.27; local is 1.26.10). Cutting a release is a
+distribution decision and needs the operator's explicit yes.
 
 ## Working on this repo
 

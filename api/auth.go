@@ -79,10 +79,18 @@ type AccountConfig struct {
 	Project string `json:"project" yaml:"project"`
 
 	// Zone is the availability zone (upstream `zone`, MWS_ZONE). Optional —
-	// EffectiveZone falls back to DefaultZone. MWS's API has no region dimension
-	// above the zone, so there is no `region` field here; that is a property of
-	// the cloud and not an omission (compare Capabilities.Regionless, which
-	// Cloud.ru Evolution sets for the same reason).
+	// EffectiveZone falls back to DefaultZone.
+	//
+	// There is deliberately no `region` field HERE, but do not read that as "MWS
+	// has no regions" — an earlier draft of this comment said exactly that and it
+	// is measured FALSE. The distinction is which layer carries it: the PROVIDER
+	// takes `project`/`zone`/`endpoint` and no region, while individual RESOURCES
+	// do take one, and the driver advertises `Regionless: false`, which makes
+	// `region:` REQUIRED in the operator's `vm:` block. So the region lives on
+	// the resource, is resolved by the plugin (see internal/mapping.go's
+	// zoneRegions), and is checked for agreement with the zone. Contrast
+	// Capabilities.Regionless, which Cloud.ru Evolution sets because its API
+	// genuinely has no region dimension at all.
 	Zone string `json:"zone,omitempty" yaml:"zone,omitempty"`
 
 	// Endpoint overrides the API host (upstream `endpoint`, MWS_BASE_ENDPOINT).
