@@ -45,6 +45,23 @@ type AccountConfig struct {
 	// ServiceAccountAuthorizedKey is the authorized-key JSON verbatim, as issued
 	// by `mws iam key create`. Carry it through `${secret:…}` — it contains a
 	// private key.
+	//
+	// It must arrive as a YAML **string** — `${secret:…}` (the normal path) or a
+	// `|` block scalar. Never as a nested YAML mapping, even though the value IS
+	// a JSON object and pasting it as a block is the obvious thing to try. On the
+	// opaque decode path, core's `PluginFieldConfig.CredentialsValue()`
+	// (api `pkg/api/read.go:537`) serialises the whole raw auth map to JSON, and
+	// its `coerceToStringIfScalarNumber` helper coerces scalars but **passes
+	// nested maps through unchanged** — so a mapping here reaches this string
+	// field as a JSON object and `json.Unmarshal` fails with "cannot unmarshal
+	// object into Go struct field ... of type string".
+	//
+	// This field makes MWS the fleet's first auth config with a string whose
+	// CONTENT is JSON, so it is the first to be able to hit that: the coercer's
+	// known case was number→string (api run 41728259367, 2026-11-03), and
+	// object→string is the untested sibling. Not a core bug — the shapes core
+	// coerces are the ones existing plugins needed — but it is ours to not walk
+	// into.
 	ServiceAccountAuthorizedKey string `json:"serviceAccountAuthorizedKey,omitempty" yaml:"serviceAccountAuthorizedKey,omitempty"`
 
 	// Token is a short-lived IAM token, the alternative to the authorized key.

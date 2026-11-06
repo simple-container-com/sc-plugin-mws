@@ -254,7 +254,7 @@ linter walks the whole module and a skipped test file costs a full round-trip:
   <touched>.go
 ```
 
-[`TRAPS.md`](TRAPS.md) is the nineteen-trap index every plugin handler must
+[`TRAPS.md`](TRAPS.md) is the twenty-trap index every plugin handler must
 honour; the canonical catalogue is
 [`forge/docs/design/2026-11-01/plugin-extraction-playbook/`](https://github.com/simple-container-com/forge/tree/main/docs/design/2026-11-01/plugin-extraction-playbook/).
 The authoring walkthrough is

@@ -1,6 +1,6 @@
 # The traps every SC plugin handler must honour
 
-Nineteen named traps bit the fleet across the five-plugin extraction wave
+Twenty named traps bit the fleet across the five-plugin extraction wave
 (sc-plugin-aws / cloudflare / cloudru / mongodb / yandex, 2026-10-18 →
 2026-11-01) and the two that followed it (mws + gcp, 2026-11-06). This file is
 the index — one line per trap — so an author adding a handler to this repo can
@@ -8,7 +8,9 @@ see which safeguards are mandatory before they write one.
 
 **Traps 17–19 are the ones this repo is currently sitting on**, and unlike most
 of the list they are not about a handler you haven't written yet — they are
-about why nothing here runs at all. Read those three first.
+about why nothing here runs at all. Read those three first. Trap 20 is the one
+this repo will hit FIRST once they clear, because it is about the very first
+fixture anyone writes here.
 
 The canonical catalogue, with root-cause narrative + fix pattern + §4 lint-pass
 check for every trap, lives at:
@@ -50,6 +52,7 @@ trip to produce; several destroyed real resources.
 | 17 | **A plugin's `auth:` type has no wire path** — `type: mws-service-account` dies at PARSE with `unknown auth type`, before the provider, the driver or any validation; the plugin binary is never dialled | **This is what is blocking this repo today.** `DetectAuthProvider` is one lookup into `providerConfigMapping`, seeded only at link time: core importing a plugin's `/api` (four plugins; not this one) or core's hardcoded `plugin_bootstrap.go` table (five; not `mws`). `SchemaResponse` has no `auth_types` field, so the dynamic-discovery path the bootstrap table's own doc recommends cannot register auth. Fix is additive `auth_types` (~15 lines, owned by the `sc-plugins` session); **this repo is the end-to-end verification**. Nothing here is actionable until it lands. Roadmap: `sc-plugin-auth-type-has-no-wire-path`. |
 | 18 | **SC decodes no config strictly** — a misplaced or misspelled key is dropped in SILENCE, and `auth:` in `server.yaml` is a no-op | Zero `KnownFields`/`UnmarshalStrict` in the whole api repo. `ServerDescriptor` has no `Auth` field; only `SecretsDescriptor`/**`secrets.yaml`** does. Symptom is `${auth:x}` reaching the cloud literal, which looks exactly like a broken bus or walker and is neither — and *identical* to the real 2026-11-03 decoder regression, so the symptom cannot tell you which you have. Diff key names against struct tags first. Inlining the credential "fixes" it by bypassing placeholder resolution: a diagnostic, never a committed fixture. |
 | 19 | **Validation that lived in the in-tree `Read*` path stops running on the opaque path** — and the first symptom is nothing at all | A dynamically-discovered type gets `pluginOwnedWrappingDecoder`, which keeps `Config.Config` as a raw `map[string]any`; parse-time typed validation is a link-time-import privilege. Live in this repo: `AccountConfig.Validate()`'s five refusal paths are written, unit-tested, and **called on no deploy path**. `VmHosts` must call it on raw-tree decode. Verify with a negative test through the *deploy* — a direct call to `Validate()` passes while the function is dead. |
+| 20 | **A string field whose CONTENT is JSON breaks if the operator writes it as a YAML mapping** — reaches the plugin as an object, `json.Unmarshal` refuses it | On the opaque path, core's `CredentialsValue()` (api `pkg/api/read.go:537`) marshals the whole raw auth map to JSON; `coerceToStringIfScalarNumber` coerces scalars and **passes nested maps through unchanged**. `AccountConfig.ServiceAccountAuthorizedKey` is a `string` holding the authorized-key JSON, which makes MWS the fleet's first config able to hit this — the coercer's tested case is number→string (api run 41728259367), object→string is the sibling. Fixture rule: `${secret:mws-sa-key}` or a `|` block scalar, never a nested block. Documented on the field in `api/auth.go`. |
 
 ## Checklist before cutting a release
 
@@ -65,6 +68,7 @@ Grep across `plugin/`:
 - [ ] `mws-service-account` resolves THROUGH CORE: a throwaway program importing core *and* `pkg/stackread` calls `api.DetectAuthProvider(&api.AuthDescriptor{Type: "mws-service-account"})` without `unknown auth type`. Controls that must resolve: `aws-token`, `yc-service-account`, `cloudru-evolution-key` (trap 17)
 - [ ] `AccountConfig.Validate()` is called by a handler on raw-tree decode, with a negative test that asserts the **deploy** refuses a bad config (trap 19)
 - [ ] No fixture puts `auth:` in `server.yaml`, and none inlines a credential (trap 18)
+- [ ] `serviceAccountAuthorizedKey` is a YAML **string** in every fixture — `${secret:…}` or a `|` block scalar, never a nested mapping (trap 20)
 - [ ] `go test ./... -count=1` green in BOTH modules — `go build ./...` does not compile test packages, so an interface change that breaks a fake passes it
 
 ## When you hit a new trap

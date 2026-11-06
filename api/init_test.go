@@ -193,3 +193,48 @@ func TestCredentialsValuePrefersTheBlob(t *testing.T) {
 	plain := &AccountConfig{Project: "p-1", Token: "t-abc"}
 	Expect(plain.CredentialsValue()).To(ContainSubstring("t-abc"))
 }
+
+// TRAP 20. `ServiceAccountAuthorizedKey` is a `string` whose CONTENT is a JSON
+// document, which makes it the first field in the fleet able to hit the
+// container-shape case of core's coercer. On the opaque decode path core
+// serialises the whole raw auth map to JSON via
+// `PluginFieldConfig.CredentialsValue()` (api `pkg/api/read.go:537`), running
+// each value through `coerceToStringIfScalarNumber` — which coerces scalars but
+// passes nested maps through UNCHANGED. So an operator who pastes the key file
+// as a YAML mapping (the intuitive thing, since the value really is a JSON
+// object) sends an object where this field is a string.
+//
+// Both forms are asserted here rather than just the good one: the failing form
+// must fail, and it must fail naming the field, because the message is the only
+// thing the operator sees. The string form is what `${secret:…}` and a `|` block
+// scalar both produce.
+func TestAuthorizedKeyMustArriveAsAString(t *testing.T) {
+	RegisterTestingT(t)
+
+	const key = `{"id":"k1","privateKey":"-----BEGIN PRIVATE KEY-----"}`
+
+	// The two shapes an operator can legitimately write — `${secret:…}` and a
+	// `|` block scalar — both reach us as a JSON string. These must decode.
+	stringForm, err := json.Marshal(map[string]any{
+		"project":                     "p-1",
+		"serviceAccountAuthorizedKey": key,
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	var ok AccountConfig
+	Expect(json.Unmarshal(stringForm, &ok)).To(Succeed())
+	Expect(ok.ServiceAccountAuthorizedKey).To(Equal(key))
+
+	// A nested YAML mapping arrives as a JSON object. This must be refused, and
+	// the error must name the field so the operator can find it.
+	mappingForm, err := json.Marshal(map[string]any{
+		"project":                     "p-1",
+		"serviceAccountAuthorizedKey": map[string]any{"id": "k1", "privateKey": "..."},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	var bad AccountConfig
+	err = json.Unmarshal(mappingForm, &bad)
+	Expect(err).To(HaveOccurred())
+	Expect(err.Error()).To(ContainSubstring("serviceAccountAuthorizedKey"))
+}
