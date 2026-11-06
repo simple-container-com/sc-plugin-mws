@@ -30,11 +30,20 @@ package mws
 //     there being no bucket, registry or DNS resource in this cloud to pair it
 //     with — would get no `plugins.mws:` auto-inject and fail late.
 //
-// Note (1) also means that whoever implements the driver must clear
-// `Implemented: false` IN SC CORE's table, in the same change that records the
-// live smoke, and ship a release of api before this plugin can advertise a
-// working driver. That is playbook trap 8: a plugin change that depends on an
-// `/api` change is a two-release change.
+// A WARNING about note (1), because this comment used to say the opposite and
+// the opposite is harmful: whoever implements the driver must NOT touch core's
+// `mws-vm` row. An earlier version of this paragraph instructed the next author
+// to clear its `Implemented: false` in the api repo and ship a paired api
+// release. api #558 (`e8dcd103`, merged 2026-11-06) chose the other shape —
+// `coreOwned() = Implemented && !MigratedToPlugin` — so a never-implemented
+// placeholder row is no longer mistaken for a built-in and a plugin's registered
+// row wins on registration, `LookupDriver` and `PluginForDriver`. Under that
+// rule, setting `Implemented: true` in core would make the row core-owned again
+// and lock THIS plugin out of its own driver name. Core's row stays a
+// placeholder permanently; the plugin hand-builds its own spec. So the driver
+// slice is NOT playbook trap 8's two-release change — it takes no api commit at
+// all, only a pin bump. And the release half is already satisfied: api release
+// `2026.11.24` points exactly at `e8dcd103`.
 //
 // Prior art for the driver itself: sc-plugin-cloudru's `cloudru-evolution-vm` is
 // the fleet's first plugin-owned VM driver (stdout-parsed address via

@@ -48,9 +48,10 @@ var ErrVmDriverNotImplemented = errors.Errorf(
 //   - Core's `mws-vm` row must stay `Implemented: false` **forever**. Flipping it
 //     to true would make it core-owned again and lock this plugin out of its own
 //     driver name — #558's own compatibility note says so. So the driver slice
-//     needs NO api commit at all; it needs an api *release* carrying #558 and a
-//     pin bump. (An earlier revision of this comment had it backwards and told
-//     the next author to clear `Implemented` in the api repo. Don't.)
+//     needs NO api commit at all; it needs a pin bump, and the release it needs
+//     already exists: api `2026.11.24` IS the #558 merge `e8dcd103`. (An earlier
+//     revision of this comment had it backwards and told the next author to clear
+//     `Implemented` in the api repo. Don't.)
 //
 // # What to fill in, and what not to guess
 //

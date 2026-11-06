@@ -38,9 +38,10 @@ func TestDriverTokenAgreesWithCore(t *testing.T) {
 //
 // Advertising the driver is a change in THIS repo only: write VmHosts, hand-build
 // the spec in VmDriverSpec() with `Implemented: true` + a non-empty `Unverified`
-// + measured capabilities, put it in Schema(), and bump the api pin to a release
-// carrying #558. At that point this test is replaced by assertions on the
-// hand-built row — it is scaffolding for the pre-driver state, not an invariant.
+// + measured capabilities, put it in Schema(), and bump the api pin to >=
+// `e8dcd103` (shipped as api release `2026.11.24`). At that point this test is
+// replaced by assertions on the hand-built row — it is scaffolding for the
+// pre-driver state, not an invariant.
 //
 // `Capabilities.CloudInit` is asserted separately because it outlives this test:
 // a `true` there must come from a live machine, never from the Yandex analogy.

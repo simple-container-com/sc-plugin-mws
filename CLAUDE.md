@@ -46,14 +46,17 @@ bucket.
   - `Schema()` advertises `mws` and nothing else. **Every emptiness there has a
     comment giving its reason** — keep that property; an uncommented empty field
     reads as an oversight and invites someone to "fix" it.
-  - `VmDrivers` is empty for two reasons. (a) On an SC core predating
-    [api #558](https://github.com/simple-container-com/api/pull/558) — which is
-    *every released core* as of 2026-11-06, since the merge (`e8dcd103`) landed
-    after `v2026.11.23` was cut — `vm.RegisterPluginDriver` refuses the
-    placeholder row and core turns that into `return err` out of the whole plugin
-    load: **every** deploy dies, not just VM ones. (b) The driver isn't written,
-    and `internal.VmDriverSpec()` mirrors core's `Implemented: false` row, so
-    advertising it would refuse a deploy identically to advertising nothing.
+  - `VmDrivers` is empty because **the driver isn't written** —
+    `internal.VmDriverSpec()` mirrors core's `Implemented: false` row, so
+    advertising it would refuse a deploy identically to advertising nothing. It
+    was *also* unsafe until 2026-11-06: on an SC core predating
+    [api #558](https://github.com/simple-container-com/api/pull/558),
+    `vm.RegisterPluginDriver` refuses the placeholder row and core turns that
+    into `return err` out of the whole plugin load — **every** deploy dies, not
+    just VM ones. **That gate is now clear:** api release `2026.11.24` points
+    exactly at the #558 merge `e8dcd103`. But an operator on an *older* core
+    still hits the hard failure, so the commit that starts advertising `mws-vm`
+    must also bump the pin — they land together, as below.
     Core's row must stay a placeholder forever — flipping its `Implemented` makes
     it core-owned again and locks this plugin out of `mws-vm`. So the driver slice
     takes **no api commit**, only a pin bump. See `internal/vm_driver.go`.
@@ -122,6 +125,14 @@ Both `go.mod` files pin `github.com/simple-container-com/api` to the **same**
 pseudo-version. The template arrived with the two modules skewed; keep them
 together. Moving the pin is how the VM driver unblocks, so a pin bump and a
 `Schema()` change will land in the same commit.
+
+A **pseudo-version** is not an oversight: the api repo publishes `sc` CLI
+releases under tags with **no `v` prefix** (`2026.11.24`), and its only
+`v`-prefixed tags are `-preview` prereleases — `go list -m -versions
+github.com/simple-container-com/api` comes back empty. So pin by commit
+(`go get github.com/simple-container-com/api@e8dcd103`), and read "a release
+carries it" as a statement about the **operator's binary**, which is the thing
+that loads the plugin, not about anything `go.mod` can name.
 
 ## Traps
 

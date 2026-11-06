@@ -76,22 +76,44 @@ That is the exact shape of the 2026-10-30 `sc-plugin-cloudru` breakage.
 #558 **merged 2026-11-06** as `e8dcd103`, replacing that check with
 `coreOwned() = Implemented && !MigratedToPlugin` — so a never-implemented
 placeholder row is no longer mistaken for a built-in, and a plugin's registered
-row wins on both `LookupDriver` and `PluginForDriver`. Two gates remain, and
-neither is #558:
+row wins on both `LookupDriver` and `PluginForDriver`.
 
-1. **No api *release* carries it yet.** The newest is `v2026.11.23`, cut
-   2026-11-05 — before the merge — and that is what both `go.mod` files pin. A
-   released core would still refuse the registration.
-2. **The driver isn't written.** `internal.VmDriverSpec()` currently mirrors
-   core's row, which says `Implemented: false`, so advertising it would make
-   `VmConfig.Validate` refuse `provider: mws-vm` with the same message an
-   operator gets with no plugin installed. Advertising buys nothing until the
-   spec is hand-built with `Implemented: true` and measured capabilities.
+**The release gate cleared the same day.** api release **`2026.11.24`** (title
+`v2026.11.24`, published 2026-11-06 16:03 UTC) points *exactly* at `e8dcd103` —
+the merge commit itself, committed 15:37 UTC, 26 minutes earlier. So an `sc`
+binary an operator can download now carries `coreOwned()`, and registration of
+`mws-vm` by this plugin would be accepted. Two things to know when you check
+this yourself:
+
+- **The release tags carry no `v` prefix.** `gh release list` prints the release
+  *title* (`v2026.11.24`) in column 1 and the *tag* (`2026.11.24`) in column 3;
+  `gh release view v2026.11.24` and `git/refs/tags/v2026.11.24` both 404. Use
+  `gh api repos/simple-container-com/api/compare/e8dcd103...<tag>` and look for
+  `"status":"identical"` or `behind_by: 0`.
+- **That release is the `sc` CLI binary, not a Go module version.** The only
+  `v`-prefixed tags in the api repo are `-preview` prereleases, and
+  `go list -m -versions github.com/simple-container-com/api` returns nothing, so
+  both `go.mod` files stay on a **pseudo-version** — bump them to the one at
+  `e8dcd103` (`go get github.com/simple-container-com/api@e8dcd103`), not to
+  `2026.11.24`.
+
+One gate remains:
+
+**The driver isn't written.** `internal.VmDriverSpec()` currently mirrors
+core's row, which says `Implemented: false`, so advertising it would make
+`VmConfig.Validate` refuse `provider: mws-vm` with the same message an
+operator gets with no plugin installed. Advertising buys nothing until the
+spec is hand-built with `Implemented: true` and measured capabilities.
+
+Note the pin bump and `Schema()` change must land **together**: an operator on
+a core older than `2026.11.24` still hits the hard plugin-load failure, so the
+commit that starts advertising `mws-vm` is also the commit that raises the
+floor.
 
 The useful thing #558 *did* buy: core's `mws-vm` row stays a placeholder
 **permanently** (flipping its `Implemented` would make it core-owned again and
 lock this plugin out), so the driver slice is a change in **this repo only** — no
-paired api commit, just a pin bump once a release exists.
+paired api commit, just the pin bump.
 
 `mws-vm` *is* in `OwnedTypes`, which is correct and not an inconsistency:
 fool-protection reads a VM resource's `provider:` through `api.VmConfigAware`

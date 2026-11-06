@@ -24,12 +24,22 @@
 // "which SC core provides itself" and EVERY deploy that loads this plugin dies.
 // That is the exact shape of the 2026-10-30 sc-plugin-cloudru breakage.
 //
-// #558 MERGED 2026-11-06 (api e8dcd103), but the newest api release — v2026.11.23,
-// cut 2026-11-05, which is also what both go.mod files pin — predates the merge.
-// So every RELEASED core still refuses, and the hazard is live until the next
-// api release.
+// #558 MERGED 2026-11-06 (api e8dcd103) and api release 2026.11.24, published
+// 26 minutes later, points at exactly that commit — verified with
+// `gh api repos/simple-container-com/api/compare/e8dcd103...2026.11.24` →
+// "status":"identical". So a downloadable `sc` binary now accepts the
+// registration and the release gate is CLEAR. Two notes for whoever re-checks:
+// the api release tags carry no `v` prefix (the `v2026.11.24` in `gh release
+// list` is the title; `gh release view v2026.11.24` 404s), and that release is
+// the CLI binary, not a Go module version — the only v-tags in the api repo are
+// `-preview` prereleases, so both go.mod files stay on a pseudo-version and the
+// pin moves by commit (`go get …/api@e8dcd103`).
 //
-// And when that release lands, it still does not by itself make advertising
+// What does NOT clear: an operator still on a core older than 2026.11.24 hits
+// the hard plugin-load failure above. So the commit that starts advertising
+// `mws-vm` is also the commit that raises the pin — they cannot be split.
+//
+// And the release by itself still does not make advertising
 // worthwhile, which is the easy thing to get wrong here. VmDriverSpec() reads
 // core's own Drivers row, and that row says Implemented: false — so core would
 // merge in a spec that makes VmConfig.Validate() refuse `provider: mws-vm`
@@ -39,8 +49,8 @@
 // exists. At that point VmDriverSpec() stops reading core's table and
 // hand-builds the row the way sc-plugin-echo does.
 //
-// So the order is: api release carrying #558 → write the driver → hand-build the
-// spec, advertise it, and bump the api pin, all in one change — and note that
+// So the remaining order is: write the driver → hand-build the spec, advertise
+// it, and bump the api pin to >= e8dcd103, all in one change — and note that
 // that change needs no api COMMIT. #558 deliberately left core's `mws-vm` row a
 // placeholder; flipping its `Implemented` would lock this plugin back out. See
 // ../../internal/vm_driver.go for the ownership rule.
@@ -149,13 +159,16 @@ func (p *mwsPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		//                           the AWS KMS API, which is what the
 		//                           `awskms://` gocloud URL sc-plugin-yandex uses
 		//                           actually requires.
-		//   VmDrivers             — two gates, both still shut; see the package
-		//                           doc. (a) no api RELEASE carries #558 yet, so
-		//                           a released core still refuses the placeholder
-		//                           row and fails the whole plugin load; (b) the
-		//                           driver isn't written, and a spec read from
-		//                           core's Implemented:false row refuses a deploy
-		//                           identically to advertising nothing. This is
+		//   VmDrivers             — one gate left; see the package doc. The api
+		//                           RELEASE gate cleared 2026-11-06 (2026.11.24
+		//                           IS #558's merge e8dcd103), so a current core
+		//                           would accept the row. What remains is that
+		//                           the driver isn't written, and a spec read
+		//                           from core's Implemented:false row refuses a
+		//                           deploy identically to advertising nothing.
+		//                           Advertising must land together with the pin
+		//                           bump, since an operator on an older core
+		//                           still fails the whole plugin load. This is
 		//                           the one entry that is sequencing rather than
 		//                           absence.
 		PulumiPlugins: []*scpluginv1.PulumiPluginRequirement{
