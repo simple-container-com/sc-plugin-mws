@@ -35,8 +35,26 @@ Consequences for anyone working here:
 - **"The driver slice needs no api commit" is scoped.** True of the driver
   *token* — `VmDrivers` does cross the wire, which is what api #558 made safe.
   False of the plugin being *usable*.
+- **When you do write the smoke fixture, `auth:` goes in `secrets.yaml` — only
+  there.** `api.ServerDescriptor` (`pkg/api/server.go:86`) has no `Auth` field;
+  only `api.SecretsDescriptor` (`pkg/api/secrets.go:13`) does, populated solely
+  by `ReadSecretsDescriptor`. And **SC decodes no config strictly** (zero
+  `KnownFields`/`UnmarshalStrict` in the whole api repo), so an `auth:` block in
+  `server.yaml` is dropped in *silence*: `stack.Secrets.Auth["mws-staging"]` is
+  empty, `tplAuth` hands back `${auth:mws-staging}` unchanged, and the literal
+  `$` string reaches MWS. That reads exactly like a broken bus or walker and is
+  neither. Inlining the credential appears to fix it only because it bypasses
+  placeholder resolution — a diagnostic, not a fix to keep. Live-caught by the
+  `sc-plugins` session 2026-11-06 on `sc-plugin-gcp`; it cost real time there, so
+  don't re-pay it here.
 
-Tracked in forge as `sc-plugin-auth-type-has-no-wire-path` (repo: api).
+Tracked in forge as `sc-plugin-auth-type-has-no-wire-path` (repo: api). The api
+patch is owned by the `sc-plugins` session; **this repo is the end-to-end
+verification** — once it is on api main, bump the pin, advertise
+`auth_types: ["mws-service-account"]` in `Schema()`, and report whether
+`type: mws-service-account` parses. That is the only check that the dynamic path
+works for a plugin core has never imported, which is the one case core's
+hand-maintained bootstrap table cannot cover.
 
 ## Hard rules, before anything else
 
