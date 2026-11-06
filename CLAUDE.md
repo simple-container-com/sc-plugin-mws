@@ -8,37 +8,57 @@ does and does not model, which is the difference between "not written yet" and
 registrar for a cloud with no DNS resource, or a state store for a cloud with no
 bucket.
 
-## Read this first: the plugin is not usable yet, and not for the reason you'd guess
+## Read this first: auth is cleared; what it leaves behind is yours to call
 
-The VM driver's absence is sequencing. The blocker is **auth**: there is no wire
-path by which a plugin can tell SC core that its `auth:` type exists.
-`scpluginv1.SchemaResponse` has no `auth_types` field, and
-`stackread.registerSchemaTypes` has no auth branch (there isn't even a
-`PluginOwnedKindAuth` constant). So `type: mws-service-account` fails at parse
-with `unknown auth type` — before the provider, the driver, or
-`AccountConfig.Validate()` is reached. Core learns auth types only at link time:
-by importing a plugin's `/api` (core's `go.mod` requires four; not this one) or
-from its hardcoded `pkg/api/plugin_bootstrap.go` table (five plugins; not `mws`).
+The plugin's one hard blocker is gone. It was **auth**: there was no wire path by
+which a plugin could tell SC core that its `auth:` type exists, so
+`type: mws-service-account` died at parse with `unknown auth type` — before the
+provider, the driver, or `AccountConfig.Validate()` was reached. Core learned auth
+types only at link time: by importing a plugin's `/api` (core's `go.mod` requires
+four; not this one) or from its hardcoded `pkg/api/plugin_bootstrap.go` table
+(five plugins; not `mws`).
+
+**api #559 fixed it, merged as `99411193`** — additive `repeated string
+auth_types = 11` on `SchemaResponse`, a `PluginOwnedKindAuth` constant, and one
+loop in `stackread.registerSchemaTypes`. This repo pins that commit and
+advertises the type in `Schema()` as of `38ab03c`; the pin bump and the
+advertisement are deliberately **one** commit, because on an older core the proto
+field does not exist and either half alone is useless. Verified end-to-end
+against a locally-built core with this plugin over the real gRPC wire —
+`auth["mws"]` decodes to `*api.PluginFieldConfig`, and a second binary differing
+only in that one line still gets `unknown auth type`, which is what makes the
+green run mean something rather than merely not-fail.
 
 Consequences for anyone working here:
 
+- **`AccountConfig.Validate()` is this plugin's job to call, and nothing calls it
+  yet.** Dynamically-discovered types get the *opaque* decoder (`map[string]any`
+  on the bus), not the typed one, so core performs **no** parse-time validation of
+  the auth tree. `VmHosts` is the first handler that must decode the raw tree and
+  call `Validate()` before touching MWS. Parse-time typed validation remains a
+  link-time-import privilege this plugin doesn't have.
 - **Don't write "parsed + validated at config time" about this plugin.** It was
-  written and unit-tested; it is not reached. Verified offline against core
-  `41dc03e8` — `mws-service-account` fails, `cloudru-evolution-key` /
-  `yc-service-account` / `aws-token` resolve.
-- **`AccountConfig.Validate()` is this plugin's job to call.** Even after the
-  wire path lands, dynamically-discovered types get the *opaque* decoder
-  (`map[string]any` on the bus), not the typed one. `VmHosts` is the first
-  handler that must decode the raw tree and call `Validate()` before touching
-  MWS. Parse-time typed validation is a link-time-import privilege this plugin
-  doesn't have.
+  written and unit-tested; it is still not reached. The reason is now the opaque
+  decoder (TRAPS 19), not the missing wire path (TRAPS 17, cleared).
+- **Every refusal is ours, at deploy time, after the state-store lock.** Because
+  the decoder is opaque there is no string-typed field for core to reject a nested
+  mapping against: a `serviceAccountAuthorizedKey` written as a YAML object parses
+  clean, warns nothing, and crosses the wire verbatim — the refusal lands here in
+  `api.ConvertAuth` (`json: cannot unmarshal object into Go struct field
+  AccountConfig.serviceAccountAuthorizedKey of type string`) in a subprocess, mid
+  deploy. Measured 2026-11-06; see TRAPS 20.
+- **An operator must declare an explicit `plugins: mws:` block** in the same
+  stack's `server.yaml`. `DiscoverPluginTypes` reads `descriptor.Plugins` *before*
+  `ReadServerConfigs`, and `ValidatePluginRequirements` injects specs inside it —
+  so auto-injection runs after type discovery and cannot bootstrap this. Omitting
+  the block reproduces the pre-fix `unknown auth type "mws-service-account"`
+  byte-identically, which reads exactly like "the patch didn't land".
 - **"The driver slice needs no api commit" is scoped.** True of the driver
   *token* — `VmDrivers` does cross the wire, which is what api #558 made safe.
-  False of the plugin being *usable*.
-- **When you do write the smoke fixture, `auth:` goes in `secrets.yaml` — only
-  there.** `api.ServerDescriptor` (`pkg/api/server.go:86`) has no `Auth` field;
-  only `api.SecretsDescriptor` (`pkg/api/secrets.go:13`) does, populated solely
-  by `ReadSecretsDescriptor`. And **SC decodes no config strictly** (zero
+- **`auth:` goes in `secrets.yaml` — only there.**
+  `api.ServerDescriptor` (`pkg/api/server.go:86`) has no `Auth` field; only
+  `api.SecretsDescriptor` (`pkg/api/secrets.go:13`) does, populated solely by
+  `ReadSecretsDescriptor`. And **SC decodes no config strictly** (zero
   `KnownFields`/`UnmarshalStrict` in the whole api repo), so an `auth:` block in
   `server.yaml` is dropped in *silence*: `stack.Secrets.Auth["mws-staging"]` is
   empty, `tplAuth` hands back `${auth:mws-staging}` unchanged, and the literal
@@ -49,12 +69,10 @@ Consequences for anyone working here:
   don't re-pay it here.
 
 Tracked in forge as `sc-plugin-auth-type-has-no-wire-path` (repo: api). The api
-patch is owned by the `sc-plugins` session; **this repo is the end-to-end
-verification** — once it is on api main, bump the pin, advertise
-`auth_types: ["mws-service-account"]` in `Schema()`, and report whether
-`type: mws-service-account` parses. That is the only check that the dynamic path
-works for a plugin core has never imported, which is the one case core's
-hand-maintained bootstrap table cannot cover.
+patch was owned by the `sc-plugins` session; this repo was the end-to-end
+verification, and it is the only check that the dynamic path works for a plugin
+core has never imported — the one case core's hand-maintained bootstrap table
+cannot cover. The remaining work here is sequencing: the VM driver.
 
 ## Hard rules, before anything else
 

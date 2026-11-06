@@ -2,36 +2,39 @@
 
 Simple Container's cloud plugin for **MWS (МТС Web Services)**.
 
-Status: **scaffolding, and not yet usable on any released SC core.** Read the
+Status: **scaffolding; the auth blocker is cleared, the VM driver is still unwritten.** Read the
 next two sections before assuming a gap is unfinished work — most of them are
 facts about the cloud.
 
-> **Hard blocker, found 2026-11-06: a plugin's `auth:` type has no wire path.**
-> `scpluginv1.SchemaResponse` has no `auth_types` field — its complete field set
-> is `ProviderTypes`, `ResourceTypes`, `RegistrarTypes`, `StateStoreTypes`,
-> `SecretsProviderTypes`, `ComputeProcessorTypes`, `VmDrivers`,
-> `SafeToReplaceTypes`, `PulumiPlugins`, `PluginVersion` — so there is no way for
-> this plugin to tell SC core that `mws-service-account` exists. An operator
-> writing it gets `unknown auth type "mws-service-account"` at **parse** time
-> (`api.DetectAuthProvider`, `pkg/api/read.go:182`), before the provider, the
-> driver, or `AccountConfig.Validate()` is reached.
+> **Cleared 2026-11-06: a plugin's `auth:` type had no wire path, and now does.**
+> `scpluginv1.SchemaResponse` carried no `auth_types` field, so there was no way
+> for this plugin to tell SC core that `mws-service-account` exists: an operator
+> writing it got `unknown auth type "mws-service-account"` at **parse** time
+> (`api.DetectAuthProvider`, `pkg/api/read.go:183`), before the provider, the
+> driver, or `AccountConfig.Validate()` was reached. Both registration paths
+> were compiled into core's own binary — core's `go.mod` importing the plugin's
+> `/api` (it requires four; not this one), or its hardcoded table in
+> `pkg/api/plugin_bootstrap.go` (five plugins; not `mws`).
 >
-> The two registration paths are both compiled into core's binary: core's
-> `go.mod` importing the plugin's `/api` (it requires four —
-> `sc-plugin-{aws,cloudflare,mongodb,yandex}/api`, not this one), or core's
-> hardcoded table in `pkg/api/plugin_bootstrap.go` (aws, yandex, cloudflare,
-> cloudru, mongodb — not `mws`). Verified offline against core `41dc03e8`:
-> `mws-service-account` fails while `cloudru-evolution-key`, `yc-service-account`
-> and `aws-token` resolve.
+> Fixed by **api #559, merged as `99411193`** (additive `repeated string
+> auth_types = 11` on `SchemaResponse`, a `PluginOwnedKindAuth` constant, and one
+> loop in `stackread.registerSchemaTypes`). This repo pins that commit and
+> advertises the type in `Schema()` as of `38ab03c` — the pin bump and the
+> advertisement in **one** commit, because on an older core the proto field does
+> not exist and either half alone is useless. Verified end-to-end against a
+> locally-built core and this plugin over the real gRPC wire: `auth["mws"]`
+> decodes to `*api.PluginFieldConfig`, and with the advertisement removed and
+> nothing else changed, `unknown auth type` returns.
 >
-> Tracked as **`sc-plugin-auth-type-has-no-wire-path`** in the forge roadmap
-> (repo: api). Recommended fix is an additive `auth_types` field on
-> `SchemaResponse` plus a `PluginOwnedKindAuth` branch in
-> `stackread.registerSchemaTypes` — which that function's own doc already
-> anticipates. Note it would give auth the **opaque** decoder, so
-> `AccountConfig.Validate()` must then be called by **this plugin** when it
-> decodes the raw tree on its own bus; parse-time *typed* validation stays a
-> link-time-import privilege.
+> **Two things that did not go away.** The decoder this buys is the **opaque**
+> one, so `AccountConfig.Validate()` must be called by **this plugin** when it
+> decodes the raw tree on its own bus — core performs no parse-time validation of
+> an opaquely-decoded auth tree, and parse-time *typed* validation stays a
+> link-time-import privilege. And an operator must declare an explicit
+> `plugins: mws:` block in the same stack's `server.yaml`: auto-injection runs
+> after type discovery and cannot bootstrap one, so omitting it reproduces
+> `unknown auth type` verbatim. Tracked as
+> **`sc-plugin-auth-type-has-no-wire-path`** in the forge roadmap.
 
 ## What this plugin owns
 
