@@ -22,10 +22,28 @@
 // older than the release carrying api PR #558, `mws-vm` has an unflagged
 // placeholder row in the in-tree Drivers table, so registration is refused with
 // "which SC core provides itself" and EVERY deploy that loads this plugin dies.
-// That is the exact shape of the 2026-10-30 sc-plugin-cloudru breakage. So:
-// advertise VmDrivers only once #558 has shipped in a release, and bump the api
-// pin in the same change. internal.VmDriverSpec() is already written and tested
-// for that moment.
+// That is the exact shape of the 2026-10-30 sc-plugin-cloudru breakage.
+//
+// #558 MERGED 2026-11-06 (api e8dcd103), but the newest api release — v2026.11.23,
+// cut 2026-11-05, which is also what both go.mod files pin — predates the merge.
+// So every RELEASED core still refuses, and the hazard is live until the next
+// api release.
+//
+// And when that release lands, it still does not by itself make advertising
+// worthwhile, which is the easy thing to get wrong here. VmDriverSpec() reads
+// core's own Drivers row, and that row says Implemented: false — so core would
+// merge in a spec that makes VmConfig.Validate() refuse `provider: mws-vm`
+// exactly as it already does with nothing advertised (pkg/clouds/vm/vm.go:427).
+// Advertising buys something only when this plugin declares its OWN spec with
+// Implemented: true and measured capabilities, i.e. when the driver actually
+// exists. At that point VmDriverSpec() stops reading core's table and
+// hand-builds the row the way sc-plugin-echo does.
+//
+// So the order is: api release carrying #558 → write the driver → hand-build the
+// spec, advertise it, and bump the api pin, all in one change — and note that
+// that change needs no api COMMIT. #558 deliberately left core's `mws-vm` row a
+// placeholder; flipping its `Implemented` would lock this plugin back out. See
+// ../../internal/vm_driver.go for the ownership rule.
 //
 // # Trap-prevention invariants inherited from the template
 //
@@ -131,9 +149,15 @@ func (p *mwsPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		//                           the AWS KMS API, which is what the
 		//                           `awskms://` gocloud URL sc-plugin-yandex uses
 		//                           actually requires.
-		//   VmDrivers             — blocked on api #558 shipping; see the package
-		//                           doc above. This is the one entry that is
-		//                           sequencing rather than absence.
+		//   VmDrivers             — two gates, both still shut; see the package
+		//                           doc. (a) no api RELEASE carries #558 yet, so
+		//                           a released core still refuses the placeholder
+		//                           row and fails the whole plugin load; (b) the
+		//                           driver isn't written, and a spec read from
+		//                           core's Implemented:false row refuses a deploy
+		//                           identically to advertising nothing. This is
+		//                           the one entry that is sequencing rather than
+		//                           absence.
 		PulumiPlugins: []*scpluginv1.PulumiPluginRequirement{
 			// Empty until the VM driver lands, at which point this becomes
 			// `{Package: "mws", Version: "0.1.0", Server:

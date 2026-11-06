@@ -46,11 +46,17 @@ bucket.
   - `Schema()` advertises `mws` and nothing else. **Every emptiness there has a
     comment giving its reason** — keep that property; an uncommented empty field
     reads as an oversight and invites someone to "fix" it.
-  - `VmDrivers` is empty **because advertising it would break every deploy** on
-    an SC core predating [api #558](https://github.com/simple-container-com/api/pull/558):
-    `vm.RegisterPluginDriver` refuses a placeholder row and core turns that into
-    `return err` out of the whole plugin load. `internal/vm_driver_test.go` fails
-    with instructions the moment core's table changes.
+  - `VmDrivers` is empty for two reasons. (a) On an SC core predating
+    [api #558](https://github.com/simple-container-com/api/pull/558) — which is
+    *every released core* as of 2026-11-06, since the merge (`e8dcd103`) landed
+    after `v2026.11.23` was cut — `vm.RegisterPluginDriver` refuses the
+    placeholder row and core turns that into `return err` out of the whole plugin
+    load: **every** deploy dies, not just VM ones. (b) The driver isn't written,
+    and `internal.VmDriverSpec()` mirrors core's `Implemented: false` row, so
+    advertising it would refuse a deploy identically to advertising nothing.
+    Core's row must stay a placeholder forever — flipping its `Implemented` makes
+    it core-owned again and locks this plugin out of `mws-vm`. So the driver slice
+    takes **no api commit**, only a pin bump. See `internal/vm_driver.go`.
   - Any handler you add that touches Pulumi: `runtime.NewContext(stdctx, header,
     runtime.WithLocalEngineFallback(p.progress))` + `defer runtime.Settle(rctx,
     &resp, &err)`, named returns `(resp *T, err error)`. Never `pctx.Close()`,

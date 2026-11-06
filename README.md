@@ -53,10 +53,25 @@ refused with *"which SC core provides itself"* — for a driver core does not
 provide at all — and **every deploy that loads this plugin dies**, VM or not.
 That is the exact shape of the 2026-10-30 `sc-plugin-cloudru` breakage.
 
-So the driver is a two-release change: #558 ships, the api pin moves in both
-modules, `internal.VmDriverSpec()` goes into `Schema()`.
-`plugin/internal/vm_driver_test.go` already asserts today's placeholder state and
-will fail — on purpose, with instructions — the moment core's table changes.
+#558 **merged 2026-11-06** as `e8dcd103`, replacing that check with
+`coreOwned() = Implemented && !MigratedToPlugin` — so a never-implemented
+placeholder row is no longer mistaken for a built-in, and a plugin's registered
+row wins on both `LookupDriver` and `PluginForDriver`. Two gates remain, and
+neither is #558:
+
+1. **No api *release* carries it yet.** The newest is `v2026.11.23`, cut
+   2026-11-05 — before the merge — and that is what both `go.mod` files pin. A
+   released core would still refuse the registration.
+2. **The driver isn't written.** `internal.VmDriverSpec()` currently mirrors
+   core's row, which says `Implemented: false`, so advertising it would make
+   `VmConfig.Validate` refuse `provider: mws-vm` with the same message an
+   operator gets with no plugin installed. Advertising buys nothing until the
+   spec is hand-built with `Implemented: true` and measured capabilities.
+
+The useful thing #558 *did* buy: core's `mws-vm` row stays a placeholder
+**permanently** (flipping its `Implemented` would make it core-owned again and
+lock this plugin out), so the driver slice is a change in **this repo only** — no
+paired api commit, just a pin bump once a release exists.
 
 `mws-vm` *is* in `OwnedTypes`, which is correct and not an inconsistency:
 fool-protection reads a VM resource's `provider:` through `api.VmConfigAware`

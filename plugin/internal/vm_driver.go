@@ -23,26 +23,48 @@ var ErrVmDriverNotImplemented = errors.Errorf(
 	vm.DriverMws, "mws", vm.Drivers[vm.DriverMws].RoadmapItem,
 )
 
-// VmDriverSpec is the capability row this plugin WILL advertise in Schema() once
-// api PR #558 has shipped in a release — see the package doc on
-// ../cmd/sc-plugin-mws/main.go for why advertising it before then takes down
-// every deploy that loads the plugin.
+// VmDriverSpec is the capability row this plugin will advertise in Schema() when
+// the driver lands. Today it mirrors SC core's placeholder row, which means it
+// says `Implemented: false` — i.e. advertising it right now would be exactly as
+// useful as advertising nothing, because LookupDriver would return this row and
+// VmConfig.Validate would refuse `provider: mws-vm` with the same "not
+// implemented yet" message an operator gets with no plugin installed.
 //
-// It reads SC core's own `Drivers` table rather than restating the capabilities
-// here, which is the rule for every real plugin (sc-plugin-echo hand-builds a
-// spec only because `echo-vm` has no in-tree row). Two things follow from that
-// and are easy to miss:
+// # The ownership rule, post api #558
 //
-//   - The row is the SOURCE OF TRUTH for what the driver can do, and it lives in
-//     the api repo. Clearing `Implemented: false` and filling `Capabilities` is an
-//     /api change that must ship in the SAME release wave as the driver — a
-//     plugin change depending on an /api change is a two-release change (playbook
-//     trap 8).
-//   - `Capabilities.CloudInit` is currently the zero value because nobody has
-//     measured it: MWS's provider documents no `user_data` input anywhere, and
+// api #558 (`e8dcd103`, merged 2026-11-06) made `coreOwned()` the single
+// predicate behind "a plugin cannot replace a built-in driver":
+//
+//	func (i DriverInfo) coreOwned() bool { return i.Implemented && !i.MigratedToPlugin }
+//
+// `mws-vm` is one of five rows that are a name plus a roadmap item and nothing
+// else, so it is no longer treated as a built-in: registration is allowed, and
+// `LookupDriver` / `PluginForDriver` let the PLUGIN's row win over the in-tree
+// one. Two consequences, and the second is the counter-intuitive one:
+//
+//   - When the driver lands, this function stops reading core's table and
+//     HAND-BUILDS the spec, the way sc-plugin-echo does. The plugin's row is the
+//     source of truth for a driver the plugin implements.
+//   - Core's `mws-vm` row must stay `Implemented: false` **forever**. Flipping it
+//     to true would make it core-owned again and lock this plugin out of its own
+//     driver name — #558's own compatibility note says so. So the driver slice
+//     needs NO api commit at all; it needs an api *release* carrying #558 and a
+//     pin bump. (An earlier revision of this comment had it backwards and told
+//     the next author to clear `Implemented` in the api repo. Don't.)
+//
+// # What to fill in, and what not to guess
+//
+//   - `Unverified` must be non-empty until a machine has actually been created on
+//     MWS. Validate refuses an unverified driver unless the resource opts in with
+//     `allowUnverifiedProvider: true`, and quotes the reason verbatim.
+//     "Implemented" and "known to work" are different claims.
+//   - `Capabilities.CloudInit` stays at the zero value until measured: MWS's
+//     provider documents no `user_data` input anywhere, and
 //     `os.metadata.attributes` is a plausible slot by analogy with Yandex and
 //     nothing more. Shared code in pkg/clouds/pulumi/vm branches on this field,
-//     so a guess here fails twenty minutes into a deploy. Measure, then fill.
+//     so a guess here fails twenty minutes into a deploy.
+//   - `MultiAZInRegion` likewise — zero means "not measured", and Validate
+//     declines to check against it rather than inventing a limit.
 func VmDriverSpec() *scpluginv1.VmDriverSpec {
 	return vm.Drivers[vm.DriverMws].ToProto(vm.DriverMws)
 }

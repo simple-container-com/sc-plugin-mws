@@ -26,27 +26,31 @@ func TestDriverTokenAgreesWithCore(t *testing.T) {
 		"api/init.go's DriverMwsVm literal must equal pkg/clouds/vm.DriverMws")
 }
 
-// VmDriverSpec reads SC core's table, so this test states what that table says
-// TODAY and will fail the moment it changes. That is the point: the two things
-// it asserts are both preconditions for Schema() advertising the driver.
+// VmDriverSpec still mirrors SC core's placeholder row, and this test pins that
+// — but read the failure mode carefully, because it is the opposite of what the
+// shape suggests.
 //
-//   - `Implemented: false` means SC core still carries `mws-vm` as a PLACEHOLDER
-//     row. Advertising a placeholder is refused by vm.RegisterPluginDriver on any
-//     core older than the release carrying api #558, and that refusal is
-//     `return err` out of the whole plugin load — every deploy, not just VM ones.
-//   - An empty `Capabilities.CloudInit` means nobody has measured whether MWS
-//     accepts user-data. Shared VM code branches on it.
+// Core's `mws-vm` row MUST stay `Implemented: false` permanently. Post api #558
+// (`e8dcd103`) the predicate deciding "a plugin cannot replace a built-in" is
+// `Implemented && !MigratedToPlugin`, so flipping that row to true would make it
+// core-owned again and lock this plugin out of its own driver name. A failure
+// here is therefore a REGRESSION IN THE API REPO to go fix, not a green light.
 //
-// So when this test fails because core now says `Implemented: true` with real
-// capabilities, that is the signal to add VmDriverSpec() to Schema() and bump the
-// api pin in both modules — not a signal to update the expectations here.
+// Advertising the driver is a change in THIS repo only: write VmHosts, hand-build
+// the spec in VmDriverSpec() with `Implemented: true` + a non-empty `Unverified`
+// + measured capabilities, put it in Schema(), and bump the api pin to a release
+// carrying #558. At that point this test is replaced by assertions on the
+// hand-built row — it is scaffolding for the pre-driver state, not an invariant.
+//
+// `Capabilities.CloudInit` is asserted separately because it outlives this test:
+// a `true` there must come from a live machine, never from the Yandex analogy.
 func TestVmDriverSpecIsStillAPlaceholder(t *testing.T) {
 	RegisterTestingT(t)
 
 	spec := VmDriverSpec()
 	Expect(spec.GetDriver()).To(Equal(vm.DriverMws))
 	Expect(spec.GetImplemented()).To(BeFalse(),
-		"core's Drivers[mws-vm] row is implemented now — see this test's doc: advertise VmDriverSpec() in Schema() and pin the api release carrying #558")
+		"core's Drivers[mws-vm] row says Implemented: true — that row must stay a placeholder or coreOwned() locks this plugin out of mws-vm; see this test's doc and api #558")
 	Expect(spec.GetRoadmapItem()).To(Equal("sc-ru-clouds-beyond-yandex"))
 	Expect(spec.GetCapabilities().GetCloudInit()).To(BeFalse(),
 		"cloud-init on MWS is unmeasured; a true here must come with a live smoke")
