@@ -10,7 +10,7 @@ require (
 	github.com/pulumi/pulumi-tls/sdk/v5 v5.5.0
 	github.com/pulumi/pulumi/sdk/v3 v3.245.0
 	github.com/simple-container-com/api v0.0.0-20261106174745-994111935a5d
-	github.com/simple-container-com/pulumi-mws/sdk v0.0.0-20261106191639-229a4ca71d20
+	github.com/simple-container-com/pulumi-mws/sdk v0.1.0
 	github.com/simple-container-com/sc-plugin-mws/api v0.0.0
 )
 

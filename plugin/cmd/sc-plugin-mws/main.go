@@ -45,10 +45,11 @@
 // deploy refuses without `allowUnverifiedProvider: true`. Clear that reason in
 // the change that records a boot, not in one that reports a compile.
 //
-// The other half is distribution: there is no pulumi-mws RELEASE, so the engine
-// cannot download `pulumi-resource-mws` even though PulumiPlugins names it
-// correctly below. A release pipeline is a distribution decision and needs the
-// operator's explicit yes.
+// The distribution half is now DONE: pulumi-mws v0.1.0 is released (four
+// platform archives), the SDK pins 0.1.0, and PulumiPlugins below asks for the
+// same number, so the engine can fetch `pulumi-resource-mws`. What remains
+// before `Unverified` can be cleared is one thing only — a machine that
+// actually boots, with the operator's approval to provision it.
 //
 // # Trap-prevention invariants inherited from the template
 //
@@ -188,17 +189,19 @@ func (p *mwsPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 			// SDK is what every resource in internal/vm_hosts.go actually requests:
 			// `sdk/go/mws/internal/pulumiUtilities.go`'s PkgResourceDefaultOpts bakes
 			// `PluginDownloadURL("github://api.github.com/simple-container-com/pulumi-mws")`
-			// and `Version("0.0.1-dev")` into every single one. A number invented
+			// and `Version("0.1.0")` into every single one. A number invented
 			// here that disagrees with that would have core prefetch one version
 			// while the resources ask for another.
 			//
-			// `0.0.1-dev` is the generator's placeholder — it appears because the SDK
-			// was generated without a version stamp (`pulumiVersion.go` has
-			// `SdkVersion = semver.Version{}`). It is honest about the state of
-			// things rather than tidy: there is no pulumi-mws RELEASE yet, so the
-			// engine cannot fetch `pulumi-resource-mws` at all. When the release
-			// pipeline is approved and lands, the SDK must be regenerated with a real
-			// version and this line moved with it — the two are one change.
+			// It read `0.0.1-dev` until 2026-11-07, and that was not cosmetic: the
+			// SDK's baked version is what the ENGINE resolves the plugin by, so every
+			// resource asked for a `pulumi-resource-mws` v0.0.1-dev that no tag would
+			// ever produce. Root cause was in pulumi-mws's Makefile — its `tfgen`
+			// target was the one build not passed `-ldflags`, and the SDK generator
+			// reads `version.Version` off the TFGEN binary (not off schema.json,
+			// which this bridge path never writes a `version` key into at all). Fixed
+			// + regenerated at 0.1.0 in pulumi-mws `27dc939`; this line and that
+			// commit are one change, and the release tag must agree with both.
 			//
 			// PluginDownloadUrl is the field's real name; there is no `Server` field
 			// on this message. It is non-empty precisely because this is a
@@ -207,7 +210,7 @@ func (p *mwsPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 			// anyway (see pulumi-mws's README).
 			{
 				Package:           "mws",
-				Version:           "0.0.1-dev",
+				Version:           "0.1.0",
 				PluginDownloadUrl: "github://api.github.com/simple-container-com/pulumi-mws",
 			},
 			// pulumi-tls — the VM driver mints two ED25519 key pairs (the deploy key
