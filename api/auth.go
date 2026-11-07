@@ -68,6 +68,23 @@ type AccountConfig struct {
 	// Useful for a one-off local run against an already-authenticated session;
 	// not useful in CI, where the token would expire between provision and
 	// deploy. Prefer ServiceAccountAuthorizedKey for anything durable.
+	//
+	// MEASURED against the live API 2026-11-07, and the trap is the naming:
+	// MWS's own **"API key"** — the `v1.…` value you are handed for the
+	// account — is NOT this token. The platform APIs reject it outright:
+	//
+	//	GET https://compute.mwsapis.ru/compute/v1/projects/<p>/images
+	//	Authorization: Bearer v1.…
+	//	=> 401 {"code":"UNAUTHENTICATED","description":
+	//	    "Для авторизации используйте IAM token. …"}
+	//
+	// (The vendor's own `examples/gpt_test.go` sends that key as a bearer to
+	// the AI surface, which is what it is for.) Only the authorized-key →
+	// IAM-token exchange authenticates compute/vpc/rm, and it was verified
+	// working the same day: `mws.Load` + `ListVirtualMachines` returns 200 with
+	// MWS_SERVICE_ACCOUNT_AUTHORIZED_KEY_PATH set. So an operator who pastes
+	// an API key here gets a 401 at PROVISION time, not a parse error — the
+	// two credentials are indistinguishable to this field's type.
 	Token string `json:"token,omitempty" yaml:"token,omitempty"`
 
 	// Project is the MWS project (folder) every resource lands in — upstream's
