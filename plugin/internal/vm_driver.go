@@ -19,11 +19,17 @@ import (
 // what to expect rather than a label. Clear it in the same change that records a
 // machine booting through SC on MWS — not before, and not in a change that only
 // reports a green build.
-const mwsUnverified = "no machine has ever been provisioned on MWS by this driver: " +
-	"every fact it encodes (flavour grid, the single disk type, where boot images live, " +
-	"cloud-init through os.metadata.attributes[\"user-data\"], the default-DENY ingress) " +
-	"is read-only API probing plus vendor example code — see CLOUD-FACTS.md. " +
-	"The first deploy is the measurement"
+// It is deliberately precise about HOW FAR the driver has got, because "never
+// tried" and "tried and walled on the cloud's side" are different things to an
+// operator deciding whether to opt in.
+const mwsUnverified = "no machine has ever been provisioned on MWS by this driver. " +
+	"A real apply on 2026-11-07 created the network and then hit a hard MWS quota — " +
+	"externalAddressCount is 0 in the test project — two resources short of the machine, " +
+	"so the flavour grid, the single disk type, where boot images live and " +
+	"cloud-init through os.metadata.attributes[\"user-data\"] are all still " +
+	"read-only API probing plus vendor example code. See CLOUD-FACTS.md. " +
+	"Also unfixed: an MWS stack cannot be destroyed from a machine that did not deploy it. " +
+	"The first apply that reaches a booted VM is the measurement"
 
 // VmDriverSpec is the capability row this plugin advertises in Schema().
 //

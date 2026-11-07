@@ -299,7 +299,7 @@ func VmHosts(pctx *sdk.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmH
 		// above is MWS's, not a slip. `Metadata.Id()` is a StringPtrOutput because
 		// the field is optional in the schema; requireString turns an absent value
 		// into an error naming the field instead of a silent "".
-		Subnet: requireString(subnet.Metadata.Id(), "subnet metadata.id"),
+		Subnet: requireString(pctx, subnet.Metadata.Id(), "subnet metadata.id"),
 	}, opts...)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to reserve the internal address of vm %q", resourceName)
@@ -365,7 +365,7 @@ func VmHosts(pctx *sdk.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmH
 					Addresses: mwscompute.VirtualMachineNetworkNetworkInterfaceAddressArray{
 						&mwscompute.VirtualMachineNetworkNetworkInterfaceAddressArgs{
 							Address: &mwscompute.VirtualMachineNetworkNetworkInterfaceAddressAddressArgs{
-								Ref: requireString(internalAddress.Metadata.Id(), "internal address metadata.id"),
+								Ref: requireString(pctx, internalAddress.Metadata.Id(), "internal address metadata.id"),
 							},
 							// This is what binds the reserved public address to the NIC.
 							// MWS has no separate "associate" resource; the association
@@ -375,7 +375,7 @@ func VmHosts(pctx *sdk.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmH
 							OneToOneNat: &mwscompute.VirtualMachineNetworkNetworkInterfaceAddressOneToOneNatArgs{
 								External: &mwscompute.VirtualMachineNetworkNetworkInterfaceAddressOneToOneNatExternalArgs{
 									Address: &mwscompute.VirtualMachineNetworkNetworkInterfaceAddressOneToOneNatExternalAddressArgs{
-										Ref: requireString(externalAddress.Metadata.Id(), "external address metadata.id"),
+										Ref: requireString(pctx, externalAddress.Metadata.Id(), "external address metadata.id"),
 									},
 								},
 							},
@@ -399,7 +399,7 @@ func VmHosts(pctx *sdk.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmH
 	// destination is the internal address of the virtual machine, not the reserved
 	// external one". Using the external address here produces a rule that is
 	// accepted, looks right in the console, and matches nothing.
-	internalCIDR := requireString(internalAddress.Status.IpAddress(), "internal address status.ipAddress").
+	internalCIDR := requireString(pctx, internalAddress.Status.IpAddress(), "internal address status.ipAddress").
 		ApplyT(func(ip string) string { return ip + "/32" }).(sdk.StringOutput)
 
 	rules := make([]sdk.Resource, 0, len(ports))
@@ -442,7 +442,7 @@ func VmHosts(pctx *sdk.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmH
 		// `status.ipAddress` on the external address, and OutputRefTo (which
 		// AddressOf uses) addresses only TOP-LEVEL resource properties — it cannot
 		// reach into a nested provider output.
-		AddressOutput(requireString(externalAddress.Status.IpAddress(), "external address status.ipAddress")).
+		AddressOutput(requireString(pctx, externalAddress.Status.IpAddress(), "external address status.ipAddress")).
 		PrivateKeyOf(deployKey, "privateKeyOpenssh").
 		// Every rule is a dependency, not just the machine: the machine can be
 		// RUNNING and still unreachable, because ingress is default-deny on this
@@ -482,12 +482,40 @@ func VmHosts(pctx *sdk.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmH
 // nothing, and fed to AddressOutput, is a host SC tries to SSH to at the empty
 // address. Failing here names the field and the resource.
 //
-// Preview is NOT a failure case: on preview the output is unknown, the ApplyT body
-// never runs, and the unknown propagates — which is what every downstream reader
-// already handles.
-func requireString(out sdk.StringPtrOutput, field string) sdk.StringOutput {
+// Preview MUST be excluded explicitly, and an earlier version of this comment was
+// wrong about why. It claimed "on preview the output is unknown, the ApplyT body
+// never runs, and the unknown propagates". MEASURED FALSE on the first preview this
+// driver ever ran (2026-11-07): the body runs, with `v == nil`, and the deploy dies
+// before creating anything with
+//
+//	external address status.ipAddress; SC cannot reference a resource it has
+//	no id for (this is a provider or API-shape change, not a config error)
+//
+// — a message that accuses the provider of changing shape when nothing is wrong at
+// all. The unknown-propagates rule holds for a TOP-LEVEL computed attribute; it does
+// not hold here, because `status` is a nested block the bridge resolves to a known
+// zero value during preview, so `status.ipAddress` is a known nil rather than an
+// unknown. Any `requireString` over a nested field has this shape.
+//
+// Only `status.ipAddress` was observed failing, but the gate is applied at EVERY
+// call site, `metadata.id` included. Which of the five the bridge hands back as a
+// known nil versus an unknown is not something this code should encode: ApplyT
+// bodies run in no guaranteed order, so the one error that surfaced says nothing
+// about the other four, and each extra round-trip to find out costs a preview.
+//
+// Gating on DryRun rather than softening the nil check keeps the check that matters:
+// on a real apply the resource exists, and a nil there still fails loudly. Whether
+// MWS populates these two fields on a created resource is exactly what this driver's
+// first apply measures, so the apply-path assertion must stay sharp.
+func requireString(ctx *sdk.Context, out sdk.StringPtrOutput, field string) sdk.StringOutput {
 	return out.ApplyT(func(v *string) (string, error) {
 		if v == nil || *v == "" {
+			if ctx.DryRun() {
+				// Nothing downstream dials or sends this on a preview: the host's
+				// address feeds a command provider that does not connect, and the
+				// CIDR feeds a firewall rule that is not created.
+				return "", nil
+			}
 			return "", errors.Errorf(
 				"MWS returned no %s; SC cannot reference a resource it has no id for (this is a provider "+
 					"or API-shape change, not a config error)", field,

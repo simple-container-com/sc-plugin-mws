@@ -62,6 +62,30 @@ import (
 // symlink in a shared `/tmp` cannot redirect the write. If the process is killed
 // rather than shut down, the file survives until the OS reaps the temp
 // directory — which is why the mode has to be right on the way in.
+//
+// # This whole approach is WRONG for destroy, and is on its way out
+//
+// Everything above reasons about the provision run. MEASURED 2026-11-07, on the
+// first teardown this plugin ever did: **`destroy` and `refresh` do not run the
+// Pulumi program.** The provider is rehydrated from the checkpoint still holding
+// the path below, the plugin is never invoked to re-create the file, and
+// CleanupCredentials has already removed it. The result:
+//
+//	Failed to load SDK: load service account authorized key file: read file:
+//	  open /tmp/sc-mws/<provider>/authorized-key.json: no such file or directory
+//
+// An MWS stack is undestroyable once that file is gone — a reboot, `/tmp` reaping,
+// or simply a different CI runner than the one that deployed. The deterministic
+// path is what makes manual recovery possible at all (re-create the file at
+// exactly the path in the error, then `sc destroy` proceeds), so the choice above
+// earns its keep for a reason it did not foresee. It is not a fix.
+//
+// The fix is in `pulumi-mws`: a secret `serviceAccountAuthorizedKey` VALUE in
+// provider config (`ExtraConfig`) plus a `PreConfigureCallback` that writes the
+// temp file and injects `service_account_authorized_key_path`. That callback runs
+// on every provider `Configure`, destroy and refresh included, and the credential
+// then rides encrypted in the checkpoint instead of on the deploying machine's
+// disk. When that lands, this file is deleted rather than patched.
 
 // credentialRoot is the directory every materialised key lives under, inside the
 // OS temp dir. One level of its own so CleanupCredentials has something bounded

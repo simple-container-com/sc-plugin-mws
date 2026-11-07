@@ -5,6 +5,12 @@ service-account authorized key (project `project-smecsia`), using the vendor SDK
 `go.mws.cloud/go-sdk@v0.29.0`, plus the vendor's own generated docs and example
 code at `go.mws.cloud/terraform-provider-mws@0.0.38` (`b4f0567`).
 
+On **2026-11-07** the driver was pointed at that same project for the first real
+`sc provision`. It created six resources and then hit a hard quota; see
+[The first live apply](#the-first-live-apply--2026-11-07) immediately below. That
+section is the only part of this file written from a WRITE path — everything
+after it is still read-only probing plus vendor code.
+
 It exists because the `mws-vm` driver is not written yet, and almost every fact
 below was *guessed wrong first* by analogy to Yandex. Read it before you fill in
 `VmDriverSpec()`'s capabilities or write a single Pulumi resource.
@@ -18,6 +24,137 @@ is inference — if it isn't measured or vendor-authored, it is in
 > inline disk spec writes `diskType = "nbs-pl2"` — camelCase, bare id — which
 > contradicts the generated schema (`disk_type`, and prefixed elsewhere). Trust
 > `docs/resources/*.md` (generated from the schema) and the SDK examples.
+
+## The first live apply — 2026-11-07
+
+`sc provision -s smoke-mws` against `project-smecsia`, core built from api `main`
+plus the `Header.DryRun` fix below, plugin built from `vm_hosts.go` with the
+preview gate. **It did not finish, and the reason is on MWS's side, not SC's.**
+Teardown was verified clean afterwards: 0 VMs, 0 disks, 0 networks, 0 external
+addresses, nothing left billing.
+
+### What a WRITE path proved that no preview could
+
+Six resources created, including one real cloud object:
+
+```
+mws:vpc/network:Network  mws-smoke-vm--staging-net
+  id     : vpc/projects/project-smecsia/networks/mws-smoke-vm--staging-net
+  kind   : vpc/v1/network
+  status : { internetAccess: true, mtu: 1500, ready: { state: "OK" } }
+```
+
+So these are now measured on a write path, not inferred:
+
+- The **whole auth chain works**: authorized-key JSON as a value → 0600 temp file
+  → `serviceAccountAuthorizedKeyPath` → `pulumi:providers:mws` → an authenticated
+  create. The `v1.…` string MWS calls an "API key" is still the wrong credential;
+  this is the right one.
+- The **zone/region cross-check** and the `https://api.mwsapis.ru` endpoint are
+  accepted as the driver spells them (`zone: ru-central1-a`, `region: ru-central1`).
+- `Network` returns its `status.ready.state` as `"OK"` — the field the inventory
+  probe keys on is populated, so "created but never ready" is distinguishable.
+- Resource **ids come back as full reference paths** (`vpc/projects/<p>/networks/<n>`),
+  which is the convention [Reference formats](#reference-formats--three-different-conventions-by-layer)
+  predicts for the vpc layer.
+
+### The wall: `externalAddressCount` quota is ZERO
+
+```
+403 QUOTA_EXCEEDED: Quotas for resource 'externalAddress' exceeded in project 'project-smecsia'
+  Details: cloudQuotas - [map[name:externalAddressCount]]
+```
+
+The project held **0** external addresses when this ran, so the *first* allocation
+exceeded the limit — the limit is zero, not exhausted. This supersedes the old
+"no quota has been exercised" note: one quota is now measured, and it is 0.
+
+**There is no way around it in config.** Checked, so nobody re-checks:
+
+- The compute NIC's inline external-address spec
+  (`mws:compute/VirtualMachineNetworkNetworkInterfaceAddressOneToOneNatExternalAddressSpec`)
+  has **no properties at all** in the provider schema. There is no ephemeral-IP
+  path like Yandex's `nat: true`; an inbound address is always a reserved
+  `vpc/externalAddress`, which is what the quota counts.
+- The vpc-level `OneToOneNatExternalAddressSpec` takes only `natGateway` — shared
+  egress, no inbound address.
+- `publicIP: false` changes nothing: the plugin creates the external address
+  unconditionally and never reads the field. That is correct, not an oversight —
+  SC has no bastion, every delivery step is an inbound SSH connection from
+  wherever `sc provision` runs, and a machine SC cannot reach would not clear
+  `Unverified` anyway.
+
+**There is no quota-read API in `go.mws.cloud/go-sdk@v0.29.0`.** `service/resources/references/`
+looks like one and is not — it is generated resource-ID parsing. So the remaining
+quotas (vCPU, RAM, disk, subnet, firewall rule) are **unknown**, and the only way
+to learn one is to hit it. Raising `externalAddressCount` is an operator action in
+the MWS console/support; ask for ≥ 2 so a retry does not wedge on a stale address.
+
+### An MWS stack could not be DESTROYED (fixed in… nothing yet)
+
+Found on teardown, and it matters more than the quota:
+
+```
+Failed to load SDK: load service account authorized key file: read file:
+  open /tmp/sc-mws/mws-smoke-vm-mws--staging/authorized-key.json: no such file or directory
+```
+
+MWS's provider accepts only `service_account_authorized_key_path`, a filesystem
+path, so `plugin/internal/credential.go` materialises a 0600 temp file. Its header
+comment reasons carefully about determinism and about not unlinking too early —
+and misses the case that actually bites: **`destroy` and `refresh` do not run the
+Pulumi program.** The provider is rehydrated from the checkpoint still pointing at
+that path, the plugin is never invoked to re-create it, and `CleanupCredentials`
+already removed it at the end of the provision run. Every MWS stack is therefore
+undestroyable once the file is gone — a reboot, `/tmp` reaping, or simply a
+different CI runner than the one that deployed.
+
+Recovery, which worked here, is only possible because the path is **deterministic**
+(the file header's rejection of `os.MkdirTemp` earns its keep for a reason it did
+not foresee): re-create the file by hand at exactly that path, then destroy
+proceeds normally (6 deleted, clean).
+
+```bash
+d=/tmp/sc-mws/<provider-resource-name>      # from the error message, verbatim
+mkdir -p "$d" && chmod 700 "$d"
+install -m 600 /dev/null "$d/authorized-key.json"
+# write the authorized-key JSON into it, then re-run sc destroy
+```
+
+**The fix belongs in `pulumi-mws`, not in the plugin.** Add a secret
+`serviceAccountAuthorizedKey` **value** to provider config (`ExtraConfig`) plus a
+`PreConfigureCallback` that writes the temp file and injects
+`service_account_authorized_key_path`. That callback runs on every provider
+`Configure` — including destroy and refresh — the credential rides encrypted in
+the checkpoint instead of on the deploying machine's disk, and `credential.go`
+goes away entirely. Not done yet; this is the next change on the MWS track.
+
+### Two seams in SC core, found here, that are not MWS-specific
+
+- **`pluginDriver.Hosts` never set `Header.DryRun`** (api `pkg/clouds/pulumi/vm/plugin_driver.go`).
+  Every other plugin dispatch path sets it (`plugin_sidecars.go:136`, `:324`, `:433`),
+  but the vm seam is split — the driver holds the `*sdk.Context`, `makeVmHostsSidecar`
+  holds the monitor address — and the field fell in the gap. Consequence: **every vm
+  plugin's `pctx.DryRun()` was always false**, so every preview-skip guard in every vm
+  plugin misfired. Fixed on api branch `fix/vm-plugin-header-dryrun` with a regression
+  test; no vm plugin could have worked around it from its own side.
+- **A `${env:}` / `${secret:}` nested INSIDE an `auth:` config is never resolved.**
+  `tplAuth` reads `stack.Secrets.Auth` while `applyTemplates` is still building its
+  fresh copy, and the copy is written back only at the very end
+  (api `placeholders.go:313-319`), so every `${auth:…}` in the walk sees the
+  unresolved tree. `${env:MWS_SA_KEY}` reached this plugin as its own 17 characters.
+  Values under `auth:` must be **literal**, in the gitignored `secrets.yaml` — which
+  is what prod forge already does. Also: `sc provision` never calls
+  `checkUnresolvedPlaceholders` (it is wired into `deploy.go` only), so an
+  unresolvable `${auth:…}` reaches the provider as literal text and surfaces as a
+  JSON parse error naming neither the placeholder nor the missing entry.
+
+### One probe correction
+
+`ListFirewallRules` is **network-scoped**: without a network it answers
+`400 INVALID_ARGUMENT: getNetwork.network has invalid value`, the same shape
+already recorded for `ListSubnets`. An inventory probe cannot count firewall rules
+project-wide; it has to enumerate networks first.
 
 ## Regions and zones — measured (`rm/sdk.ListZones`, `ListRegions`)
 
@@ -256,17 +393,23 @@ to as synonyms for the `G`/`GB` MWS actually wants — see
 
 Not guesses to fill in — open questions, each needing a live apply:
 
-- **A real VM has never been provisioned by this plugin or by me.** Everything
-  above is read-only probing plus vendor code. `Unverified` in `VmDriverSpec()`
-  must stay non-empty until a VM boots through SC and `Capabilities` are
-  re-checked against it.
-- Whether the **subnet CIDR** works as a firewall destination (above).
+- **A real VM has never been provisioned by this plugin or by me.** Still true
+  after 2026-11-07, and now true for a precise reason rather than for want of
+  trying: the apply reached the external address and stopped there, two resources
+  short of the machine. Nothing about the VM, its disk, the flavour grid, the image
+  alias table or cloud-init was exercised. `Unverified` in `VmDriverSpec()` must
+  stay non-empty until a VM boots through SC and `Capabilities` are re-checked
+  against it.
+- Whether the **subnet CIDR** works as a firewall destination (above). The 2026-11-07
+  apply did not get as far as the firewall rule.
 - Whether `os.metadata.attributes` has a **size limit** on `user-data`. Clouds
   usually cap this (YC: 256 KB); nothing in the schema or docs states one, and SC
   cloud-init payloads are not small.
-- **Quota** on this account: `ListVirtualMachines`, `ListNetworks` and the
-  project's own `ListImages` were all **0**, so nothing has ever been created
-  here and no quota has been exercised.
+- **Quotas other than `externalAddressCount`.** That one is now measured and it is
+  **0** (see [the first live apply](#the-first-live-apply--2026-11-07)). vCPU, RAM,
+  disk, subnet and firewall-rule quotas remain unknown, there is no quota-read API
+  in the vendor SDK, and a trial project may well have several more at 0 — so the
+  next apply can wall the same way one resource later.
 - `api.mwsapis.ru` from a **GitHub Actions runner** — measured only from the
   operator's line (401/envoy/HTTP-2 in ~85 ms, `188.93.55.134`, no geoblock).
 - **`vpc_firewall_rule.spec.ports` syntax.** The driver emits one rule per port
@@ -305,5 +448,14 @@ export MWS_PROJECT=<your-project>
 #       compute/sdk.ListImages{Project: "mws-ubuntu"}
 ```
 
-`mws.Load(ctx)` reads the environment and needs nothing else. Pipe any output
-through a redactor — the key document and `v1.*` tokens must never reach a log.
+`mws.Load(ctx)` reads the environment and needs nothing else — including no
+`MWS_TOKEN`; with neither variable set it fails with
+`400 INVALID_ARGUMENT: Invalid access token format`, which reads like a bad
+credential rather than a missing one. Pipe any output through a redactor — the key
+document and `v1.*` tokens must never reach a log.
+
+`ListVirtualMachines`, `ListDisks`, `ListNetworks` and `ListExternalAddresses` are
+project-scoped and need only `MWS_PROJECT`. **`ListSubnets` and `ListFirewallRules`
+are network-scoped** and answer `400 INVALID_ARGUMENT: getNetwork.network has
+invalid value` without one, so a full inventory has to enumerate networks first and
+loop.

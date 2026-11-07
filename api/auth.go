@@ -36,6 +36,14 @@ import (
 // and passing that path to the provider; see the plugin module's provider wiring
 // for where the file is created and unlinked.
 //
+// That bridge is known-incomplete, measured 2026-11-07: because the temp path is
+// a PROVIDER INPUT stored in the checkpoint, and `destroy`/`refresh` do not run
+// the Pulumi program, nothing re-creates the file and an MWS stack cannot be torn
+// down from a machine that did not deploy it. The fix is in `pulumi-mws` rather
+// than here — a secret `serviceAccountAuthorizedKey` value in provider config
+// plus a `PreConfigureCallback` that materialises the file on every `Configure`.
+// See CLOUD-FACTS.md, "The first live apply".
+//
 // This is recorded here, in the config tier, because it is the reason the field
 // below is named for its CONTENT (`serviceAccountAuthorizedKey`) and not for the
 // provider input it eventually feeds (`...Path`). An operator never supplies a
@@ -43,11 +51,28 @@ import (
 // runner.
 type AccountConfig struct {
 	// ServiceAccountAuthorizedKey is the authorized-key JSON verbatim, as issued
-	// by `mws iam key create`. Carry it through `${secret:…}` — it contains a
-	// private key.
+	// by `mws iam key create`. It contains a private key.
 	//
-	// It must arrive as a YAML **string** — `${secret:…}` (the normal path) or a
-	// `|` block scalar. Never as a nested YAML mapping, even though the value IS
+	// # Write it LITERALLY, in the stack's secrets.yaml
+	//
+	// An earlier version of this comment said to "carry it through `${secret:…}`
+	// (the normal path)". That is WRONG, and the mistake cost a provision
+	// round-trip on 2026-11-07. A `${secret:}` or `${env:}` placeholder nested
+	// inside an `auth:` config is **never resolved** before `${auth:<name>}`
+	// serialises that config: core's `tplAuth` reads `stack.Secrets.Auth` while
+	// `applyTemplates` is still building its fresh copy, and the copy is written
+	// back only at the very end (api `placeholders.go:313-319`), so every
+	// `${auth:…}` in the walk sees the unresolved tree. `${env:MWS_SA_KEY}` here
+	// reached this field as its own 17 characters of literal text.
+	//
+	// What keeps the key out of git is the FILE it goes in, not a placeholder:
+	// `auth:` belongs in the stack's `secrets.yaml` (the only descriptor
+	// `${auth:<name>}` resolves out of), which is gitignored fleet-wide. Prod
+	// forge's own `.sc/stacks/infra/secrets.yaml` holds every value under `auth:`
+	// literally, for the same reason.
+	//
+	// It must arrive as a YAML **string** — a single-quoted scalar or a
+	// `|` block. Never as a nested YAML mapping, even though the value IS
 	// a JSON object and pasting it as a block is the obvious thing to try. On the
 	// opaque decode path, core's `PluginFieldConfig.CredentialsValue()`
 	// (api `pkg/api/read.go:537`) serialises the whole raw auth map to JSON, and
